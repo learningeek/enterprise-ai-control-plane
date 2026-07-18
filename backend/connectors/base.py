@@ -71,6 +71,8 @@ class EventSink(Protocol):
 class HTTPClient(Protocol):
     def get(self, url: str, *, params: Mapping[str, str], headers: Mapping[str, str]) -> dict: ...
 
+    def post(self, url: str, *, json_body: Mapping[str, object], headers: Mapping[str, str]) -> dict: ...
+
 
 class CostEstimator(Protocol):
     def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal: ...
@@ -153,11 +155,21 @@ class Connector(ABC):
 
 
 class UrllibHTTPClient:
-    """Stdlib-only HTTPClient adapter — sufficient for a handful of authenticated GETs."""
+    """Stdlib-only HTTPClient adapter — sufficient for a handful of authenticated GETs/POSTs."""
 
     def get(self, url: str, *, params: Mapping[str, str], headers: Mapping[str, str]) -> dict:
         full_url = f"{url}?{urlencode(params)}" if params else url
         request = Request(full_url, headers=dict(headers))
+        with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed https vendor endpoints only
+            return json.load(response)
+
+    def post(self, url: str, *, json_body: Mapping[str, object], headers: Mapping[str, str]) -> dict:
+        request = Request(
+            url,
+            data=json.dumps(json_body).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
         with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed https vendor endpoints only
             return json.load(response)
 

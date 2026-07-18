@@ -61,8 +61,9 @@ re-deriving or re-litigating decisions.
   `specs/pricing-model.md` — 13 models across the 5 documented providers, 2 marked `approved=False`
   (preview/legacy) to drive the "non-approved model used" incident type.
 
-- **`backend/connectors/`** — Tier 1 connector interface + Anthropic and OpenAI reference connectors, per
-  `docs/02-architecture/connector-framework.md`'s "Connector interface" section. Run tests with:
+- **`backend/connectors/`** — Tier 1 connector interface + Anthropic, OpenAI, and Azure OpenAI reference
+  connectors, per `docs/02-architecture/connector-framework.md`'s "Connector interface" section. Run
+  tests with:
   ```
   .venv/bin/pip install -r backend/requirements.txt
   .venv/bin/python -m pytest tests/connectors/
@@ -74,41 +75,63 @@ re-deriving or re-litigating decisions.
     `backend/gateway` exists, but connector work isn't coupled to or blocked by that), `UserDirectory`
     (`CSVUserDirectory` reads `demo-data/users.csv` as a stand-in for a real Okta/Entra sync —
     connectors resolve `department` from here, they never invent it), `HTTPClient` (a stdlib-only
-    `urllib`-based default adapter, so this module adds no dependency beyond `pydantic`),
+    `urllib`-based default adapter with both `get` and `post` — not every vendor source is a paginated
+    `GET` usage-report endpoint, so this module adds no dependency beyond `pydantic`),
     `ApproximateCatalogCostEstimator` (reuses `simulation/generators/models.py`'s `MODEL_CATALOG` rather
     than a second hardcoded price table — shared by every connector without a real cost-report join), and
-    `ModelIdResolver` (maps a vendor's raw model string, e.g. `"gpt-4o-2024-08-06"`, to this platform's
-    catalog `model_id`, e.g. `"openai-gpt-4o"` — `specs/event-schema.md` requires the latter; an unmapped
-    vendor model fails loudly rather than silently writing a non-catalog string or crashing cost lookup
-    with a confusing error).
-  - `backend/connectors/anthropic_admin.py` and `backend/connectors/openai_usage.py` — two fully-worked
-    reference connectors, same shape, deliberately not identical in mapping logic where the vendor APIs
+    `ModelIdResolver` (maps a vendor's raw model/deployment string to this platform's catalog `model_id`
+    — `specs/event-schema.md` requires the latter; an unmapped vendor model fails loudly rather than
+    silently writing a non-catalog string or crashing cost lookup with a confusing error).
+  - `backend/connectors/anthropic_admin.py`, `openai_usage.py`, `azure_openai.py` — three fully-worked
+    reference connectors, deliberately not identical in mapping logic where the vendor integrations
     genuinely differ (documented per-connector, not glossed over):
-    - Neither API reports `latency_ms` or `request_cost` directly (both estimate cost via
-      `ApproximateCatalogCostEstimator`, with a `TODO` to join each vendor's real cost-report endpoint
-      once its shape is verified against a live org).
-    - Anthropic's usage report has no user field at all — only `api_key_id`/`workspace_id`; falls back to
-      a synthetic `workspace:<id>` user_id. OpenAI's does carry a `user_id` (an org member id) when the
-      org follows OpenAI's one-key-per-member practice; falls back to a synthetic `project:<id>` user_id
-      only when that's null. Both synthetic ids then correctly fail department resolution via
-      `UserDirectory` rather than guessing.
+    - Anthropic's and OpenAI's usage reports are aggregate, paginated, GET-based, bucketed by time —
+      neither reports `latency_ms` or `request_cost` directly (both estimate cost via
+      `ApproximateCatalogCostEstimator`; `TODO` to join each vendor's real cost-report endpoint once
+      verified against a live org), and both assume `outcome="success"` since the usage report only
+      covers completed, billed requests.
+    - **Azure OpenAI has no equivalent aggregate usage-report endpoint at all.** It pulls per-request rows
+      from whatever the org's Azure Monitor diagnostic settings export to a Log Analytics workspace,
+      queried via a KQL string over a single `POST` (no pagination — see `TODO` on `AzureOpenAIConnector`
+      for chunking large windows). Being per-request rather than aggregate, it's the one connector that
+      *can* report a real `latency_ms` and a real `outcome` (derived from HTTP `status_code`: 2xx ->
+      success, 400 -> blocked — Azure OpenAI content filtering commonly surfaces as 400 — else error).
+      Since the org's raw diagnostic log schema can't be assumed correctly without seeing a real
+      deployment, this connector defines a required output *column contract*
+      (`time_generated`/`deployment_name`/`prompt_tokens`/`completion_tokens`/`status_code`/
+      `correlation_id`, optionally `end_user`/`duration_ms`) that `AzureOpenAIConnectorConfig.kql_query_template`
+      must project to, rather than hardcoding a specific table/column layout as if it were certain to be
+      correct — `DEFAULT_KQL_QUERY_TEMPLATE` is explicitly labeled illustrative-only.
+    - User attribution differs across all three: Anthropic's usage report has no user field at all (only
+      `api_key_id`/`workspace_id` — synthetic `workspace:<id>` fallback); OpenAI's carries a real
+      `user_id` when the org follows one-key-per-member practice (synthetic `project:<id>` fallback);
+      Azure's resource logs generally carry only the calling service principal, not an employee, unless
+      the caller passes the OpenAI API's `user` field and the org's export surfaces it as `end_user`
+      (synthetic `deployment:<name>` fallback). All synthetic ids then correctly fail department
+      resolution via `UserDirectory` rather than guessing.
     - Anthropic's input-token fields (`uncached`/`cache_creation`/`cache_read`) are three *disjoint*
       pools that must be summed for `prompt_tokens`. OpenAI's `input_tokens` already includes cached
       tokens — `input_cached_tokens` is a *subset*, not additional — so `prompt_tokens = input_tokens`
-      directly. Adding them would double-count; this asymmetry is called out explicitly in
-      `openai_usage.py`'s docstring since it's an easy mistake to copy-paste past.
-    - Field names for both usage-report APIs should be re-verified against current vendor docs before
-      pointing either at a real org — noted explicitly in both docstrings as unverified-since-writing.
-  - `tests/connectors/` — 22 tests, all passing, using a fake `HTTPClient` per connector (no live API
-    calls, no network dependency): pagination, token-field mapping, unmapped-user fallback + failure
-    behavior, unmapped-model failure behavior, event-id determinism (needed for idempotent re-pulls), and
-    cost-estimator correctness.
-  - **Not yet built:** Azure OpenAI, AWS Bedrock, and GitHub Copilot connectors (same interface, new
-    module each — `anthropic_admin.py`/`openai_usage.py` are the references to follow). None were stubbed
-    as empty files, per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty
-    placeholder files."
-  - **Not yet built:** the real cost-report joins (currently estimated, see above), and the
-    gateway-backed `EventSink` (waits on `backend/gateway`).
+      directly. Adding them would double-count; called out explicitly in `openai_usage.py`'s docstring
+      since it's an easy mistake to copy-paste past.
+    - Model/deployment id mapping is keyed differently: Anthropic/OpenAI map a raw vendor model version
+      string (e.g. `"gpt-4o-2024-08-06"`); Azure maps an org-chosen deployment name (e.g. `"gpt4o-prod"`,
+      arbitrary per org, independent of the underlying model) via the same `ModelIdResolver`.
+    - Field/schema assumptions for all three should be re-verified against current vendor docs (and, for
+      Azure, the org's actual diagnostic export) before pointing any of them at a real org — noted
+      explicitly in each docstring as unverified-since-writing.
+  - `tests/connectors/` — 31 tests, all passing, using a fake `HTTPClient` per connector (no live API
+    calls, no network dependency): pagination (or its absence, for Azure), token-field mapping,
+    unmapped-user fallback + failure behavior, unmapped-model failure behavior, status-code-to-outcome
+    mapping (Azure), event-id determinism (needed for idempotent re-pulls), and cost-estimator
+    correctness.
+  - **Not yet built:** AWS Bedrock and GitHub Copilot connectors (same interface, new module each — the
+    three existing connectors are the references to follow, including for a fourth genuinely-different
+    vendor shape if Bedrock's CloudTrail-based usage turns out to need one). None were stubbed as empty
+    files, per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty placeholder
+    files."
+  - **Not yet built:** the real cost-report/Cost-Management joins (currently estimated, see above), and
+    the gateway-backed `EventSink` (waits on `backend/gateway`).
 
 ## Stubbed / planned but not built
 
@@ -117,7 +140,7 @@ re-deriving or re-litigating decisions.
 - `backend/governance` — policy engine
 - `backend/intelligence` — forecasting, anomaly detection, recommendations
 - `backend/connectors` — Okta/Entra, SAP, ServiceNow, Salesforce, Snowflake, MCP inventory, and the
-  remaining Tier 1 AI-provider connectors (Azure OpenAI, Bedrock, GitHub Copilot) — Anthropic and OpenAI
+  remaining Tier 1 AI-provider connectors (Bedrock, GitHub Copilot) — Anthropic, OpenAI, and Azure OpenAI
   are built, see above
 - `frontend/` — executive, engineering, and security dashboards
 
@@ -129,11 +152,13 @@ re-deriving or re-litigating decisions.
 
 ## Next up
 
-1. Build the remaining Tier 1 AI-provider-admin-API connectors (Azure OpenAI, Bedrock, GitHub Copilot)
-   following `backend/connectors/anthropic_admin.py` / `openai_usage.py`'s pattern against the shared
-   interface in `backend/connectors/base.py` (see "Implemented" above and
-   `docs/02-architecture/connector-framework.md`'s "Connector interface" section). Highest-adoption,
-   lowest-friction path to real usage data; doesn't depend on the gateway existing first.
+1. Build the remaining Tier 1 AI-provider-admin-API connectors (Bedrock, GitHub Copilot) against the
+   shared interface in `backend/connectors/base.py` (see "Implemented" above and
+   `docs/02-architecture/connector-framework.md`'s "Connector interface" section) — `anthropic_admin.py`/
+   `openai_usage.py` are the reference for an aggregate-usage-report vendor shape, `azure_openai.py` for
+   a per-request-log vendor shape; Bedrock (CloudTrail-based) may turn out to need a fourth shape rather
+   than fitting either. Highest-adoption, lowest-friction path to real usage data; doesn't depend on the
+   gateway existing first.
 2. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md`,
    using `demo-data/ai_events.csv` as a source to replay/ingest for local development. This now also
    covers Tier 2 (proxy, scoped to raw SDK/CLI usage the admin-API connectors can't see) and is the path
