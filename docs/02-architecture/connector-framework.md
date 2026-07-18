@@ -55,6 +55,17 @@ pattern:
   the intended production sink once `backend/gateway` exists, but the connector itself is not coupled to
   it — sinks are pluggable (e.g. a JSONL file sink for local dev/tests) so connector work isn't blocked on
   gateway work, and vice versa.
+- **`ModelIdResolver`** — every vendor usage API reports its own raw model string (a dated snapshot, an
+  alias, whatever that vendor calls it) — never `docs/01-domain/models.md`'s catalog `model_id` that
+  `specs/event-schema.md`'s `model` field actually requires. A connector must map vendor string ->
+  catalog `model_id` explicitly (connector-supplied config, not a guessed prefix/suffix match, since
+  vendor model strings drift); an unmapped model fails the pull loudly rather than writing a non-catalog
+  string into `AIUsageEvent.model` or corrupting cost estimation.
+
+Vendor APIs also differ in ways that must not be papered over by a shared abstraction: which token-count
+fields are disjoint pools to sum vs. an already-inclusive total with a cached subset reported separately,
+whether the API exposes any per-human-user field at all, and whether cost is on the usage report or needs
+a separate cost-report join. Document these per-connector-module, not in this shared file.
 
 Vendor-specific mapping notes (e.g. how an Anthropic Admin API usage record's fields line up with
 `AIUsageEvent`) belong in each connector module's docstring, not here — this file stays about the shared

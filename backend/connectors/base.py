@@ -72,6 +72,66 @@ class HTTPClient(Protocol):
     def get(self, url: str, *, params: Mapping[str, str], headers: Mapping[str, str]) -> dict: ...
 
 
+class CostEstimator(Protocol):
+    def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal: ...
+
+
+class ModelIdResolver:
+    """Maps a vendor-native model name/version string to this platform's canonical model_id.
+
+    `specs/event-schema.md`'s `model` field "references docs/01-domain/models.md" — i.e. it must be one
+    of `simulation/generators/models.py`'s `MODEL_CATALOG` ids (e.g. `"openai-gpt-4o"`), not the raw
+    string a vendor's usage API reports (e.g. `"gpt-4o-2024-08-06"`). Vendor model strings drift often
+    (dated snapshots, aliases), so this is an explicit, connector-supplied map rather than a guessed
+    prefix/suffix match — an unmapped model fails loudly rather than silently misattributing cost to the
+    wrong catalog entry (or bypassing the catalog check entirely).
+    """
+
+    def __init__(self, vendor_to_catalog_id: Mapping[str, str]):
+        self._vendor_to_catalog_id = dict(vendor_to_catalog_id)
+
+    def resolve(self, vendor_model_name: str) -> str:
+        try:
+            return self._vendor_to_catalog_id[vendor_model_name]
+        except KeyError:
+            raise KeyError(
+                f"no catalog model_id mapped for vendor model {vendor_model_name!r}; add it to this "
+                "connector's model_id_map config (see docs/01-domain/models.md)"
+            ) from None
+
+
+class ApproximateCatalogCostEstimator:
+    """Estimates cost from the same approximate per-model catalog `simulation/` uses.
+
+    Shared by every Tier 1 connector whose vendor doesn't (yet) have a real cost-report join wired up —
+    see e.g. `anthropic_admin.py`'s and `openai_usage.py`'s module docstrings. Deliberately reuses
+    `simulation.generators.models.MODEL_CATALOG` rather than a second hardcoded price table
+    (docs/context.md: don't create a parallel model of the same fact). Raises rather than silently
+    returning 0 for an unpriced model, since a silent-zero cost would corrupt metering/chargeback
+    without anyone noticing.
+    """
+
+    def __init__(self) -> None:
+        from simulation.generators.models import MODEL_CATALOG
+
+        self._pricing: dict[str, tuple[Decimal, Decimal]] = {
+            model_id: (Decimal(str(input_per_1m)), Decimal(str(output_per_1m)))
+            for model_id, _provider, _name, input_per_1m, output_per_1m, _ctx, _approved in MODEL_CATALOG
+        }
+
+    def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal:
+        try:
+            input_per_1m, output_per_1m = self._pricing[model]
+        except KeyError:
+            raise KeyError(
+                f"no approximate pricing on record for model={model!r}; add it to "
+                "simulation/generators/models.py's MODEL_CATALOG before ingesting its usage"
+            ) from None
+        return (Decimal(prompt_tokens) * input_per_1m + Decimal(completion_tokens) * output_per_1m) / Decimal(
+            1_000_000
+        )
+
+
 class Connector(ABC):
     """One per AI-provider admin API."""
 

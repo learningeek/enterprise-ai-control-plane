@@ -33,6 +33,12 @@ a real org; the usage-report API surface has changed before and may again:
   has no concept of "which application called this." Populated from static per-connector config, not
   invented per-event; `mcp_tool_used` is always `None` from this connector (MCP tool attribution comes
   from `docs/01-domain/mcp.md`'s own governance path, not the model-provider usage report).
+- **The API's `model` string is a dated snapshot** (e.g. `"claude-sonnet-4-20250514"`), not this
+  platform's catalog `model_id` (e.g. `"anthropic-claude-sonnet-4"` in
+  `simulation/generators/models.py`'s `MODEL_CATALOG`) — `specs/event-schema.md` requires the latter.
+  Resolved via a connector-supplied `model_id_map` (see `base.ModelIdResolver`); an unmapped snapshot
+  fails loudly rather than either writing a non-catalog string into `AIUsageEvent.model` or crashing
+  cost estimation with a confusing catalog KeyError.
 """
 
 from __future__ import annotations
@@ -40,46 +46,20 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Protocol
 
-from backend.connectors.base import AIUsageEvent, Connector, HTTPClient, UrllibHTTPClient, UserDirectory
+from backend.connectors.base import (
+    AIUsageEvent,
+    ApproximateCatalogCostEstimator,
+    Connector,
+    CostEstimator,
+    HTTPClient,
+    ModelIdResolver,
+    UrllibHTTPClient,
+    UserDirectory,
+)
 
 ANTHROPIC_API_VERSION = "2023-06-01"
 USAGE_REPORT_PATH = "/v1/organizations/usage_report/messages"
-
-
-class CostEstimator(Protocol):
-    def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal: ...
-
-
-class ApproximateCatalogCostEstimator:
-    """Estimates cost from the same approximate per-model catalog `simulation/` uses.
-
-    Deliberately reuses `simulation.generators.models.MODEL_CATALOG` rather than a second hardcoded
-    price table — see the module docstring. Raises rather than silently returning 0 for an unpriced
-    model, since a silent-zero cost would corrupt metering/chargeback without anyone noticing.
-    """
-
-    def __init__(self) -> None:
-        from simulation.generators.models import MODEL_CATALOG
-
-        self._pricing: dict[str, tuple[Decimal, Decimal]] = {
-            model_id: (Decimal(str(input_per_1m)), Decimal(str(output_per_1m)))
-            for model_id, _provider, _name, input_per_1m, output_per_1m, _ctx, _approved in MODEL_CATALOG
-        }
-
-    def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal:
-        try:
-            input_per_1m, output_per_1m = self._pricing[model]
-        except KeyError:
-            raise KeyError(
-                f"no approximate pricing on record for model={model!r}; add it to "
-                "simulation/generators/models.py's MODEL_CATALOG before ingesting its usage"
-            ) from None
-        return (Decimal(prompt_tokens) * input_per_1m + Decimal(completion_tokens) * output_per_1m) / Decimal(
-            1_000_000
-        )
 
 
 @dataclass(frozen=True)
@@ -89,6 +69,7 @@ class AnthropicAdminConnectorConfig:
     default_data_classification: str = "internal"
     base_url: str = "https://api.anthropic.com"
     api_key_owner: Mapping[str, str] = field(default_factory=dict)  # api_key_id -> user_id
+    model_id_map: Mapping[str, str] = field(default_factory=dict)  # vendor model snapshot -> catalog model_id
 
 
 class AnthropicAdminConnector(Connector):
@@ -113,6 +94,7 @@ class AnthropicAdminConnector(Connector):
         self._user_directory = user_directory
         self._cost_estimator = cost_estimator or ApproximateCatalogCostEstimator()
         self._http = http_client or UrllibHTTPClient()
+        self._model_resolver = ModelIdResolver(config.model_id_map)
 
     def pull(self, since: datetime, until: datetime | None = None) -> Iterator[AIUsageEvent]:
         until = until or datetime.now(timezone.utc)
@@ -153,10 +135,11 @@ class AnthropicAdminConnector(Connector):
             + row.get("cache_read_input_tokens", 0)
         )
         completion_tokens = row.get("output_tokens", 0)
-        model = row.get("model", "unknown")
+        vendor_model = row.get("model", "unknown")
+        model = self._model_resolver.resolve(vendor_model)
 
         return AIUsageEvent(
-            event_id=f"anthropic-admin:{bucket['starting_at']}:{workspace_id}:{api_key_id}:{model}",
+            event_id=f"anthropic-admin:{bucket['starting_at']}:{workspace_id}:{api_key_id}:{vendor_model}",
             timestamp=datetime.fromisoformat(bucket["starting_at"]),
             tenant_id=self._config.tenant_id,
             user_id=user_id,

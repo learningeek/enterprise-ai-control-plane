@@ -10,7 +10,7 @@ from backend.connectors.anthropic_admin import (
     AnthropicAdminConnectorConfig,
     ApproximateCatalogCostEstimator,
 )
-from backend.connectors.base import InMemoryUserDirectory, ListSink
+from backend.connectors.base import InMemoryUserDirectory, ListSink, ModelIdResolver
 
 SINCE = datetime(2026, 6, 1, tzinfo=timezone.utc)
 UNTIL = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -35,7 +35,7 @@ class FakeHTTPClient:
                             {
                                 "workspace_id": "wk_eng",
                                 "api_key_id": "key_alice",
-                                "model": "anthropic-claude-sonnet-4",
+                                "model": "claude-sonnet-4-20250514",
                                 "uncached_input_tokens": 800,
                                 "cache_creation_input_tokens": 0,
                                 "cache_read_input_tokens": 200,
@@ -55,7 +55,7 @@ class FakeHTTPClient:
                             {
                                 "workspace_id": "wk_shared",
                                 "api_key_id": "key_unmapped",
-                                "model": "anthropic-claude-haiku-4",
+                                "model": "claude-haiku-4-20250514",
                                 "uncached_input_tokens": 100,
                                 "cache_creation_input_tokens": 0,
                                 "cache_read_input_tokens": 0,
@@ -75,6 +75,10 @@ def connector():
         tenant_id="acme-corp",
         application_id="claude-code",
         api_key_owner={"key_alice": "U000001"},
+        model_id_map={
+            "claude-sonnet-4-20250514": "anthropic-claude-sonnet-4",
+            "claude-haiku-4-20250514": "anthropic-claude-haiku-4",
+        },
     )
     user_directory = InMemoryUserDirectory({"U000001": "Engineering", "workspace:wk_shared": "Unknown"})
     return AnthropicAdminConnector(
@@ -113,7 +117,14 @@ def test_pull_falls_back_to_synthetic_workspace_user_for_unmapped_api_key(connec
 
 
 def test_pull_raises_when_workspace_user_is_not_in_directory():
-    config = AnthropicAdminConnectorConfig(tenant_id="acme-corp", application_id="claude-code")
+    config = AnthropicAdminConnectorConfig(
+        tenant_id="acme-corp",
+        application_id="claude-code",
+        model_id_map={
+            "claude-sonnet-4-20250514": "anthropic-claude-sonnet-4",
+            "claude-haiku-4-20250514": "anthropic-claude-haiku-4",
+        },
+    )
     empty_directory = InMemoryUserDirectory({})
     connector = AnthropicAdminConnector(
         admin_api_key="sk-ant-admin-test",
@@ -121,7 +132,18 @@ def test_pull_raises_when_workspace_user_is_not_in_directory():
         user_directory=empty_directory,
         http_client=FakeHTTPClient(),
     )
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="workspace:wk_eng"):
+        list(connector.pull(SINCE, UNTIL))
+
+
+def test_pull_raises_when_vendor_model_is_not_in_model_id_map(connector):
+    connector._config = AnthropicAdminConnectorConfig(
+        tenant_id="acme-corp",
+        application_id="claude-code",
+        api_key_owner={"key_alice": "U000001"},
+    )
+    connector._model_resolver = ModelIdResolver({})
+    with pytest.raises(KeyError, match="claude-sonnet-4-20250514"):
         list(connector.pull(SINCE, UNTIL))
 
 

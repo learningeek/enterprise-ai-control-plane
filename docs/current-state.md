@@ -61,7 +61,7 @@ re-deriving or re-litigating decisions.
   `specs/pricing-model.md` — 13 models across the 5 documented providers, 2 marked `approved=False`
   (preview/legacy) to drive the "non-approved model used" incident type.
 
-- **`backend/connectors/`** — Tier 1 connector interface + first reference connector, per
+- **`backend/connectors/`** — Tier 1 connector interface + Anthropic and OpenAI reference connectors, per
   `docs/02-architecture/connector-framework.md`'s "Connector interface" section. Run tests with:
   ```
   .venv/bin/pip install -r backend/requirements.txt
@@ -73,27 +73,42 @@ re-deriving or re-litigating decisions.
     `ListSink` for tests; the gateway's `POST /v1/events` becomes the production sink once
     `backend/gateway` exists, but connector work isn't coupled to or blocked by that), `UserDirectory`
     (`CSVUserDirectory` reads `demo-data/users.csv` as a stand-in for a real Okta/Entra sync —
-    connectors resolve `department` from here, they never invent it), and `HTTPClient` (a stdlib-only
-    `urllib`-based default adapter, so this module adds no dependency beyond `pydantic`).
-  - `backend/connectors/anthropic_admin.py` — first fully-worked reference connector, pulling from
-    Anthropic's Admin API usage report and mapping to `AIUsageEvent`. Real, non-obvious limitations of
-    that API are documented in the module docstring rather than papered over: it has no per-human
-    `user_id` (only `api_key_id`/`workspace_id` — this connector takes an `api_key_owner` config map and
-    falls back to a synthetic `workspace:<id>` user, which then correctly fails department resolution
-    rather than guessing), no `latency_ms`, and no `request_cost` (cost isn't on the usage report at all;
-    Anthropic exposes a separate `cost_report` endpoint this connector doesn't yet join — see the `TODO`
-    on `AnthropicAdminConnector` — so cost is estimated via `ApproximateCatalogCostEstimator`, which
-    reuses `simulation/generators/models.py`'s `MODEL_CATALOG` rather than a second hardcoded price
-    table). Field names for the usage-report API should be re-verified against current Anthropic docs
-    before pointing this at a real org — noted explicitly in the docstring as unverified-since-writing.
-  - `tests/connectors/` — 14 tests, all passing, using a fake `HTTPClient` (no live API calls, no network
-    dependency): pagination, token-field mapping, unmapped-API-key fallback + failure behavior,
-    event-id determinism (needed for idempotent re-pulls), and cost-estimator correctness.
-  - **Not yet built:** OpenAI, Azure OpenAI, AWS Bedrock, and GitHub Copilot connectors (same interface,
-    new module each — `anthropic_admin.py` is the reference to follow). None were stubbed as empty files,
-    per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty placeholder files."
-  - **Not yet built:** the `cost_report` join for real dollar cost (currently estimated, see above), and
-    the gateway-backed `EventSink` (waits on `backend/gateway`).
+    connectors resolve `department` from here, they never invent it), `HTTPClient` (a stdlib-only
+    `urllib`-based default adapter, so this module adds no dependency beyond `pydantic`),
+    `ApproximateCatalogCostEstimator` (reuses `simulation/generators/models.py`'s `MODEL_CATALOG` rather
+    than a second hardcoded price table — shared by every connector without a real cost-report join), and
+    `ModelIdResolver` (maps a vendor's raw model string, e.g. `"gpt-4o-2024-08-06"`, to this platform's
+    catalog `model_id`, e.g. `"openai-gpt-4o"` — `specs/event-schema.md` requires the latter; an unmapped
+    vendor model fails loudly rather than silently writing a non-catalog string or crashing cost lookup
+    with a confusing error).
+  - `backend/connectors/anthropic_admin.py` and `backend/connectors/openai_usage.py` — two fully-worked
+    reference connectors, same shape, deliberately not identical in mapping logic where the vendor APIs
+    genuinely differ (documented per-connector, not glossed over):
+    - Neither API reports `latency_ms` or `request_cost` directly (both estimate cost via
+      `ApproximateCatalogCostEstimator`, with a `TODO` to join each vendor's real cost-report endpoint
+      once its shape is verified against a live org).
+    - Anthropic's usage report has no user field at all — only `api_key_id`/`workspace_id`; falls back to
+      a synthetic `workspace:<id>` user_id. OpenAI's does carry a `user_id` (an org member id) when the
+      org follows OpenAI's one-key-per-member practice; falls back to a synthetic `project:<id>` user_id
+      only when that's null. Both synthetic ids then correctly fail department resolution via
+      `UserDirectory` rather than guessing.
+    - Anthropic's input-token fields (`uncached`/`cache_creation`/`cache_read`) are three *disjoint*
+      pools that must be summed for `prompt_tokens`. OpenAI's `input_tokens` already includes cached
+      tokens — `input_cached_tokens` is a *subset*, not additional — so `prompt_tokens = input_tokens`
+      directly. Adding them would double-count; this asymmetry is called out explicitly in
+      `openai_usage.py`'s docstring since it's an easy mistake to copy-paste past.
+    - Field names for both usage-report APIs should be re-verified against current vendor docs before
+      pointing either at a real org — noted explicitly in both docstrings as unverified-since-writing.
+  - `tests/connectors/` — 22 tests, all passing, using a fake `HTTPClient` per connector (no live API
+    calls, no network dependency): pagination, token-field mapping, unmapped-user fallback + failure
+    behavior, unmapped-model failure behavior, event-id determinism (needed for idempotent re-pulls), and
+    cost-estimator correctness.
+  - **Not yet built:** Azure OpenAI, AWS Bedrock, and GitHub Copilot connectors (same interface, new
+    module each — `anthropic_admin.py`/`openai_usage.py` are the references to follow). None were stubbed
+    as empty files, per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty
+    placeholder files."
+  - **Not yet built:** the real cost-report joins (currently estimated, see above), and the
+    gateway-backed `EventSink` (waits on `backend/gateway`).
 
 ## Stubbed / planned but not built
 
@@ -102,8 +117,8 @@ re-deriving or re-litigating decisions.
 - `backend/governance` — policy engine
 - `backend/intelligence` — forecasting, anomaly detection, recommendations
 - `backend/connectors` — Okta/Entra, SAP, ServiceNow, Salesforce, Snowflake, MCP inventory, and the
-  remaining Tier 1 AI-provider connectors (OpenAI, Azure OpenAI, Bedrock, GitHub Copilot) — Anthropic is
-  built, see above
+  remaining Tier 1 AI-provider connectors (Azure OpenAI, Bedrock, GitHub Copilot) — Anthropic and OpenAI
+  are built, see above
 - `frontend/` — executive, engineering, and security dashboards
 
 ## Explicitly missing / not decided yet
@@ -114,9 +129,9 @@ re-deriving or re-litigating decisions.
 
 ## Next up
 
-1. Build the remaining Tier 1 AI-provider-admin-API connectors (OpenAI, Azure OpenAI, Bedrock, GitHub
-   Copilot) following `backend/connectors/anthropic_admin.py`'s pattern against the shared interface in
-   `backend/connectors/base.py` (see "Implemented" above and
+1. Build the remaining Tier 1 AI-provider-admin-API connectors (Azure OpenAI, Bedrock, GitHub Copilot)
+   following `backend/connectors/anthropic_admin.py` / `openai_usage.py`'s pattern against the shared
+   interface in `backend/connectors/base.py` (see "Implemented" above and
    `docs/02-architecture/connector-framework.md`'s "Connector interface" section). Highest-adoption,
    lowest-friction path to real usage data; doesn't depend on the gateway existing first.
 2. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md`,
