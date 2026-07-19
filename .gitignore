@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 demo-data/*.csv
 demo-data/*.json
+connectors.toml
+*.duckdb

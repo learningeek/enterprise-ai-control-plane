@@ -12,6 +12,7 @@ from backend.connectors.base import (
     InMemoryUserDirectory,
     JSONLSink,
     ListSink,
+    PermissiveUserDirectory,
 )
 
 DEMO_USERS_CSV = Path(__file__).resolve().parents[2] / "demo-data" / "users.csv"
@@ -77,3 +78,21 @@ def test_in_memory_user_directory_raises_on_unknown_user():
 def test_csv_user_directory_resolves_against_real_demo_data():
     directory = CSVUserDirectory(DEMO_USERS_CSV)
     assert directory.department_for("U000001") == "Engineering"
+
+
+def test_permissive_user_directory_delegates_to_wrapped_directory_when_known():
+    wrapped = InMemoryUserDirectory({"U000001": "Engineering"})
+    directory = PermissiveUserDirectory(wrapped)
+    assert directory.department_for("U000001") == "Engineering"
+
+
+def test_permissive_user_directory_falls_back_instead_of_raising():
+    wrapped = InMemoryUserDirectory({})
+    directory = PermissiveUserDirectory(wrapped)
+    assert directory.department_for("api_key:unmapped") == "Unknown"
+
+
+def test_permissive_user_directory_uses_custom_fallback():
+    wrapped = InMemoryUserDirectory({})
+    directory = PermissiveUserDirectory(wrapped, fallback="Unattributed")
+    assert directory.department_for("api_key:unmapped") == "Unattributed"

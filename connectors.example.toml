@@ -1,0 +1,47 @@
+# Example config for `python -m backend.connectors.cli sync --config connectors.toml`.
+# Copy this file to connectors.toml (gitignored) and fill in your own org's values.
+# Secrets are never written here directly — each *_env key names an environment variable to read the
+# actual admin key/token from at runtime.
+
+[global]
+tenant_id = "acme-corp"
+duckdb_path = "ai_usage.duckdb"
+users_csv = "demo-data/users.csv"  # your real org roster export, once you have one; demo-data for now
+permissive_directory = true        # resolve unknown users to "Unknown" instead of failing the whole sync
+since_days = 30                    # how far back to pull if --since isn't passed on the command line
+
+[connectors.anthropic]
+enabled = true
+admin_api_key_env = "ANTHROPIC_ADMIN_API_KEY"  # an sk-ant-admin... key, not a regular API key
+application_id = "claude-code"
+
+# vendor model snapshot -> this platform's catalog model_id (simulation/generators/models.py)
+[connectors.anthropic.model_id_map]
+"claude-sonnet-4-20250514" = "anthropic-claude-sonnet-4"
+"claude-haiku-4-20250514" = "anthropic-claude-haiku-4"
+
+# api_key_id -> your platform's user_id, for any keys you've tagged per employee (optional)
+[connectors.anthropic.api_key_owner]
+
+[connectors.openai]
+enabled = false
+admin_api_key_env = "OPENAI_ADMIN_API_KEY"  # an org owner-role key
+application_id = "internal-copilot"
+
+[connectors.openai.model_id_map]
+"gpt-4o-2024-08-06" = "openai-gpt-4o"
+"gpt-4o-mini-2024-07-18" = "openai-gpt-4o-mini"
+
+[connectors.openai.openai_user_owner]
+
+[connectors.azure_openai]
+enabled = false
+aad_bearer_token_env = "AZURE_AAD_TOKEN"
+workspace_id = "your-log-analytics-workspace-id"
+application_id = "internal-copilot"
+
+# deployment_name -> catalog model_id (Azure deployments are named per org, not by model version string)
+[connectors.azure_openai.deployment_model_id_map]
+"gpt4o-prod" = "openai-gpt-4o"
+
+[connectors.azure_openai.deployment_owner]

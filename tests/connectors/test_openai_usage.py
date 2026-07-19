@@ -79,7 +79,7 @@ def connector():
         openai_user_owner={"user_alice_openai": "U000001"},
         model_id_map=MODEL_ID_MAP,
     )
-    user_directory = InMemoryUserDirectory({"U000001": "Engineering", "project:proj_shared": "Unknown"})
+    user_directory = InMemoryUserDirectory({"U000001": "Engineering", "api_key:key_shared": "Unknown"})
     return OpenAIUsageConnector(
         admin_api_key="sk-openai-admin-test",
         config=config,
@@ -109,14 +109,14 @@ def test_pull_maps_known_openai_user_to_configured_user(connector):
     assert alice_event.latency_ms == 0  # not reported by the aggregate usage API
 
 
-def test_pull_falls_back_to_synthetic_project_user_when_user_id_is_null(connector):
+def test_pull_falls_back_to_synthetic_api_key_user_when_user_id_is_null(connector):
     events = list(connector.pull(SINCE, UNTIL))
-    shared_event = next(e for e in events if e.user_id == "project:proj_shared")
+    shared_event = next(e for e in events if e.user_id == "api_key:key_shared")
     assert shared_event.department == "Unknown"
     assert shared_event.model == "openai-gpt-4o-mini"
 
 
-def test_pull_raises_when_project_user_is_not_in_directory():
+def test_pull_raises_when_api_key_user_is_not_in_directory():
     config = OpenAIUsageConnectorConfig(
         tenant_id="acme-corp", application_id="internal-copilot", model_id_map=MODEL_ID_MAP
     )
@@ -127,7 +127,7 @@ def test_pull_raises_when_project_user_is_not_in_directory():
         user_directory=empty_directory,
         http_client=FakeHTTPClient(),
     )
-    with pytest.raises(KeyError, match="project:proj_eng"):
+    with pytest.raises(KeyError, match="api_key:key_1"):
         list(connector.pull(SINCE, UNTIL))
 
 

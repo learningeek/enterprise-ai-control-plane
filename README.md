@@ -20,6 +20,22 @@ many models, many AI-enabled applications, and many MCP servers/agents.
 Before writing a new module, check whether the concept already exists in `docs/` or `specs/`. If it
 doesn't, update the spec first — don't let architecture emerge ad hoc from code.
 
+## Try it: Tier 1 usage/cost visibility
+
+The one part of this platform that's runnable today, against a real org's own Anthropic/OpenAI/Azure
+OpenAI admin credentials, with zero changes to how anyone works:
+
+```
+cp connectors.example.toml connectors.toml   # then edit: fill in real values, set enabled = true
+export ANTHROPIC_ADMIN_API_KEY=sk-ant-admin-...
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/python -m backend.connectors.cli sync --config connectors.toml
+.venv/bin/python -m backend.connectors.cli report --config connectors.toml
+```
+
+See `docs/current-state.md` for what this does and doesn't cover, and
+`docs/02-architecture/connector-framework.md` for the architecture behind it.
+
 ## Repository layout
 
 ```

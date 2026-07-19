@@ -1,0 +1,210 @@
+"""CLI entrypoint for Tier 1 connectors.
+
+This is what turns `backend/connectors/` from library code into something a platform team can actually
+run against their own org — see docs/02-architecture/connector-framework.md and
+docs/current-state.md's "Next up". Without this, the connectors are correct but nobody outside a Python
+REPL can invoke them.
+
+Usage:
+    python -m backend.connectors.cli sync --config connectors.toml
+    python -m backend.connectors.cli sync --config connectors.toml --since 2026-06-01 --until 2026-07-01
+
+Config format: see `connectors.example.toml` at the repo root. Secrets are never stored in the config
+file itself — each connector section names an environment variable to read the admin key/token from at
+runtime, not the secret value directly.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tomllib
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from backend.connectors.anthropic_admin import AnthropicAdminConnector, AnthropicAdminConnectorConfig
+from backend.connectors.azure_openai import AzureOpenAIConnector, AzureOpenAIConnectorConfig
+from backend.connectors.base import (
+    Connector,
+    CSVUserDirectory,
+    EventSink,
+    HTTPClient,
+    PermissiveUserDirectory,
+    UserDirectory,
+)
+from backend.connectors.openai_usage import OpenAIUsageConnector, OpenAIUsageConnectorConfig
+from backend.metering.duckdb_store import DuckDBEventSink
+
+DEFAULT_SINCE_DAYS = 30
+
+
+class _NoUserDirectoryConfigured:
+    """Used when no users_csv is configured — fails clearly rather than silently returning 'Unknown'
+    for every event, which a PermissiveUserDirectory wrapper would otherwise mask as if it were a real
+    per-user lookup miss rather than "the org hasn't set this up at all yet"."""
+
+    def department_for(self, user_id: str) -> str:
+        raise KeyError(
+            f"no users_csv configured in [global]; cannot resolve department for user_id={user_id!r}"
+        )
+
+
+def load_config(path: Path) -> dict:
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def build_user_directory(config: dict) -> UserDirectory:
+    global_config = config.get("global", {})
+    users_csv = global_config.get("users_csv")
+    directory: UserDirectory = CSVUserDirectory(Path(users_csv)) if users_csv else _NoUserDirectoryConfigured()
+    if global_config.get("permissive_directory", True):
+        directory = PermissiveUserDirectory(directory)
+    return directory
+
+
+def _require_env(env_var: str, connector_name: str) -> str:
+    value = os.environ.get(env_var, "")
+    if not value:
+        raise SystemExit(f"missing env var {env_var!r}, required by [connectors.{connector_name}]")
+    return value
+
+
+def build_connectors(
+    config: dict,
+    user_directory: UserDirectory,
+    http_client_factory: Callable[[], HTTPClient] | None = None,
+) -> dict[str, Connector]:
+    tenant_id = config["global"]["tenant_id"]
+    connectors_config = config.get("connectors", {})
+    http_client = http_client_factory() if http_client_factory else None
+    built: dict[str, Connector] = {}
+
+    anthropic_cfg = connectors_config.get("anthropic", {})
+    if anthropic_cfg.get("enabled"):
+        api_key = _require_env(anthropic_cfg["admin_api_key_env"], "anthropic")
+        built["anthropic"] = AnthropicAdminConnector(
+            admin_api_key=api_key,
+            config=AnthropicAdminConnectorConfig(
+                tenant_id=tenant_id,
+                application_id=anthropic_cfg["application_id"],
+                default_data_classification=anthropic_cfg.get("default_data_classification", "internal"),
+                api_key_owner=anthropic_cfg.get("api_key_owner", {}),
+                model_id_map=anthropic_cfg.get("model_id_map", {}),
+            ),
+            user_directory=user_directory,
+            http_client=http_client,
+        )
+
+    openai_cfg = connectors_config.get("openai", {})
+    if openai_cfg.get("enabled"):
+        api_key = _require_env(openai_cfg["admin_api_key_env"], "openai")
+        built["openai"] = OpenAIUsageConnector(
+            admin_api_key=api_key,
+            config=OpenAIUsageConnectorConfig(
+                tenant_id=tenant_id,
+                application_id=openai_cfg["application_id"],
+                default_data_classification=openai_cfg.get("default_data_classification", "internal"),
+                openai_user_owner=openai_cfg.get("openai_user_owner", {}),
+                model_id_map=openai_cfg.get("model_id_map", {}),
+            ),
+            user_directory=user_directory,
+            http_client=http_client,
+        )
+
+    azure_cfg = connectors_config.get("azure_openai", {})
+    if azure_cfg.get("enabled"):
+        token = _require_env(azure_cfg["aad_bearer_token_env"], "azure_openai")
+        built["azure_openai"] = AzureOpenAIConnector(
+            aad_bearer_token=token,
+            config=AzureOpenAIConnectorConfig(
+                tenant_id=tenant_id,
+                application_id=azure_cfg["application_id"],
+                workspace_id=azure_cfg["workspace_id"],
+                default_data_classification=azure_cfg.get("default_data_classification", "internal"),
+                deployment_owner=azure_cfg.get("deployment_owner", {}),
+                deployment_model_id_map=azure_cfg.get("deployment_model_id_map", {}),
+            ),
+            user_directory=user_directory,
+            http_client=http_client,
+        )
+
+    return built
+
+
+def sync_all(connectors: dict[str, Connector], sink: EventSink, since: datetime, until: datetime) -> int:
+    """Runs sync() on every connector; one connector's failure doesn't block the others."""
+    total = 0
+    for name, connector in connectors.items():
+        try:
+            count = connector.sync(sink, since, until)
+        except Exception as exc:  # noqa: BLE001 - report and continue, don't let one vendor outage kill the run
+            print(f"{name}: FAILED — {exc}", file=sys.stderr)
+            continue
+        print(f"{name}: {count} new event(s)")
+        total += count
+    return total
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def run_sync(
+    config_path: Path,
+    since_arg: str | None,
+    until_arg: str | None,
+    http_client_factory: Callable[[], HTTPClient] | None = None,
+) -> int:
+    config = load_config(config_path)
+    global_config = config.get("global", {})
+
+    until = _parse_iso_utc(until_arg) if until_arg else datetime.now(timezone.utc)
+    since_days = global_config.get("since_days", DEFAULT_SINCE_DAYS)
+    since = _parse_iso_utc(since_arg) if since_arg else until - timedelta(days=since_days)
+
+    user_directory = build_user_directory(config)
+    connectors = build_connectors(config, user_directory, http_client_factory=http_client_factory)
+    if not connectors:
+        print("no connectors enabled in [connectors.*]", file=sys.stderr)
+        return 0
+
+    sink = DuckDBEventSink(global_config["duckdb_path"])
+    return sync_all(connectors, sink, since, until)
+
+
+def run_report(config_path: Path, output_path: Path) -> None:
+    from backend.metering.report import generate_report
+
+    config = load_config(config_path)
+    generate_report(config["global"]["duckdb_path"], output_path)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Tier 1 connector CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    sync_parser = subparsers.add_parser("sync", help="pull usage from configured connectors into DuckDB")
+    sync_parser.add_argument("--config", type=Path, default=Path("connectors.toml"))
+    sync_parser.add_argument("--since", type=str, default=None, help="ISO date/datetime, default: N days ago")
+    sync_parser.add_argument("--until", type=str, default=None, help="ISO date/datetime, default: now")
+
+    report_parser = subparsers.add_parser("report", help="regenerate the HTML usage/cost dashboard")
+    report_parser.add_argument("--config", type=Path, default=Path("connectors.toml"))
+    report_parser.add_argument("--output", type=Path, default=Path("ai_usage_report.html"))
+
+    args = parser.parse_args(argv)
+
+    if args.command == "sync":
+        total = run_sync(args.config, args.since, args.until)
+        print(f"total: {total} new event(s)")
+    elif args.command == "report":
+        run_report(args.config, args.output)
+        print(f"wrote {args.output}")
+
+
+if __name__ == "__main__":
+    main()

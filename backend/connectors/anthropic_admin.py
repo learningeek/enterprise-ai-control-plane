@@ -26,9 +26,13 @@ a real org; the usage-report API surface has changed before and may again:
 - **The usage report has no per-human-user field** — it groups by `api_key_id`/`workspace_id`, not a
   `docs/01-domain/users.md`-style `user_id`. Per-user attribution is only recoverable if the org tags API
   keys per user; this connector takes an `api_key_owner` map (`api_key_id -> user_id`) for that case and
-  falls back to a synthetic `workspace:<workspace_id>` user_id — with department resolution then failing
-  loudly via `UserDirectory`, which is correct: a workspace is not a person, and metering/governance
-  should not silently attribute shared-key usage to one individual or an invented department.
+  falls back to a synthetic `api_key:<api_key_id>` user_id — with department resolution then failing
+  loudly via `UserDirectory` (or resolving to "Unknown" via a permissive one — see `base.PermissiveUserDirectory`),
+  which is correct: an API key is not a person, and metering/governance should not silently attribute
+  shared-key usage to one individual or an invented department. The fallback is keyed by `api_key_id`
+  rather than the coarser `workspace_id`, deliberately — the usage report gives real per-key granularity
+  even without an owner mapping, and collapsing multiple keys in one workspace into a single synthetic id
+  would throw that away for no reason.
 - **`application_id`, `data_classification`, `mcp_tool_used` have no source in this API at all** — Anthropic
   has no concept of "which application called this." Populated from static per-connector config, not
   invented per-event; `mcp_tool_used` is always `None` from this connector (MCP tool attribution comes
@@ -127,7 +131,7 @@ class AnthropicAdminConnector(Connector):
     def _to_event(self, bucket: dict, row: dict) -> AIUsageEvent:
         api_key_id = row.get("api_key_id", "")
         workspace_id = row.get("workspace_id", "")
-        user_id = self._config.api_key_owner.get(api_key_id) or f"workspace:{workspace_id}"
+        user_id = self._config.api_key_owner.get(api_key_id) or f"api_key:{api_key_id}"
 
         prompt_tokens = (
             row.get("uncached_input_tokens", 0)

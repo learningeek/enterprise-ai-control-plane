@@ -103,12 +103,15 @@ re-deriving or re-litigating decisions.
       must project to, rather than hardcoding a specific table/column layout as if it were certain to be
       correct — `DEFAULT_KQL_QUERY_TEMPLATE` is explicitly labeled illustrative-only.
     - User attribution differs across all three: Anthropic's usage report has no user field at all (only
-      `api_key_id`/`workspace_id` — synthetic `workspace:<id>` fallback); OpenAI's carries a real
-      `user_id` when the org follows one-key-per-member practice (synthetic `project:<id>` fallback);
-      Azure's resource logs generally carry only the calling service principal, not an employee, unless
-      the caller passes the OpenAI API's `user` field and the org's export surfaces it as `end_user`
-      (synthetic `deployment:<name>` fallback). All synthetic ids then correctly fail department
-      resolution via `UserDirectory` rather than guessing.
+      `api_key_id`/`workspace_id` — synthetic `api_key:<api_key_id>` fallback, deliberately keyed by the
+      finer-grained API key rather than the coarser workspace, so per-key usage isn't collapsed away);
+      OpenAI's carries a real `user_id` when the org follows one-key-per-member practice (same
+      `api_key:<api_key_id>` fallback otherwise); Azure's resource logs generally carry only the calling
+      service principal, not an employee, unless the caller passes the OpenAI API's `user` field and the
+      org's export surfaces it as `end_user` (synthetic `deployment:<name>` fallback — Azure has no
+      equivalent per-key concept in the diagnostic log shape this connector targets). All synthetic ids
+      then correctly fail department resolution via `UserDirectory` — or resolve to `"Unknown"` via
+      `PermissiveUserDirectory`, see below — rather than guessing.
     - Anthropic's input-token fields (`uncached`/`cache_creation`/`cache_read`) are three *disjoint*
       pools that must be summed for `prompt_tokens`. OpenAI's `input_tokens` already includes cached
       tokens — `input_cached_tokens` is a *subset*, not additional — so `prompt_tokens = input_tokens`
@@ -120,29 +123,82 @@ re-deriving or re-litigating decisions.
     - Field/schema assumptions for all three should be re-verified against current vendor docs (and, for
       Azure, the org's actual diagnostic export) before pointing any of them at a real org — noted
       explicitly in each docstring as unverified-since-writing.
-  - `tests/connectors/` — 31 tests, all passing, using a fake `HTTPClient` per connector (no live API
+  - `backend/connectors/base.py` also has **`PermissiveUserDirectory`** — wraps another `UserDirectory`
+    and returns `"Unknown"` instead of raising when department can't be resolved. The strict directories
+    still fail loudly by default (correct when accuracy matters); this exists so the CLI/dashboard below
+    can run *before* an org has done any roster/ownership-mapping setup, rather than crashing on the
+    first unmapped key.
+  - `tests/connectors/` — 35 tests, all passing, using a fake `HTTPClient` per connector (no live API
     calls, no network dependency): pagination (or its absence, for Azure), token-field mapping,
-    unmapped-user fallback + failure behavior, unmapped-model failure behavior, status-code-to-outcome
-    mapping (Azure), event-id determinism (needed for idempotent re-pulls), and cost-estimator
-    correctness.
-  - **Not yet built:** AWS Bedrock and GitHub Copilot connectors (same interface, new module each — the
-    three existing connectors are the references to follow, including for a fourth genuinely-different
-    vendor shape if Bedrock's CloudTrail-based usage turns out to need one). None were stubbed as empty
-    files, per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty placeholder
-    files."
+    unmapped-user fallback + failure behavior (including that per-API-key granularity is preserved, not
+    collapsed to workspace/project level, when unmapped), unmapped-model failure behavior,
+    status-code-to-outcome mapping (Azure), event-id determinism (needed for idempotent re-pulls), and
+    cost-estimator correctness.
+  - **Not yet built:** AWS Bedrock, GitHub Copilot, Google Gemini/Vertex AI connectors (same interface,
+    new module each — the three existing connectors are the references to follow; Gemini/Vertex AI is
+    expected to need `azure_openai.py`'s shape, not `anthropic_admin.py`'s/`openai_usage.py`'s — see
+    `docs/02-architecture/connector-framework.md`), and an "ingest from an existing LLM proxy"
+    connector (LiteLLM/Portkey spend-tracking API as a Tier 1 source — see that doc's "Positioning
+    relative to LLM proxies" section for why this isn't this platform building its own proxy). None were
+    stubbed as empty files, per `docs/99-meta/repository-evolution.md`'s "avoid resurrecting large empty
+    placeholder files."
   - **Not yet built:** the real cost-report/Cost-Management joins (currently estimated, see above), and
     the gateway-backed `EventSink` (waits on `backend/gateway`).
 
+- **`backend/connectors/cli.py`** — the entrypoint that turns the connectors above from library code into
+  something a platform team can actually run, per the "immediately useful" pivot in this project's
+  session history. Config-driven (TOML — see `connectors.example.toml` at the repo root), secrets read
+  from env vars named in the config, never stored in it.
+  ```
+  cp connectors.example.toml connectors.toml   # then edit: fill in real values, set enabled = true
+  export ANTHROPIC_ADMIN_API_KEY=sk-ant-admin-...
+  .venv/bin/python -m backend.connectors.cli sync --config connectors.toml
+  .venv/bin/python -m backend.connectors.cli report --config connectors.toml
+  ```
+  `sync` runs every enabled connector into a `DuckDBEventSink`; `report` regenerates the dashboard from
+  whatever's in that store. Smoke-tested against the real Anthropic endpoint with an invalid key during
+  this session — reached the real API and got a real `401`, confirming the request construction is
+  correct, not just internally self-consistent against test fakes.
+
+- **`backend/metering/`** — first real slice built, not just a README anymore:
+  - `duckdb_store.py` — `DuckDBEventSink` (`EventSink` implementation, DuckDB per ADR 0003), inserts
+    idempotent on `event_id` (`emit()` returns the count of *newly* inserted rows, so re-running `sync`
+    over an overlapping window is safe and doesn't double-count — this is `Connector.pull()`'s
+    idempotency requirement actually being relied on, not just asserted in a connector test). Plus
+    `usage_summary()`, a query helper aggregating by `(user_id, department, provider, model)`.
+  - `report.py` — renders `usage_summary()`'s output as a self-contained static HTML dashboard (stat
+    tiles, cost-by-provider bar chart, top-API-keys-by-cost bar chart, full sortable table), built per
+    this project's dataviz skill (fixed categorical color order by provider — never reassigned based on
+    which providers are present in a given store; `html.escape()` on every user-controlled field). Leads
+    with an explicit banner: `user_id` is a real employee only where an org has done the ownership-mapping
+    setup, otherwise a synthetic `api_key:<id>`/`deployment:<name>` id with `department="Unknown"` — the
+    dashboard does not imply more attribution completeness than the data actually has, per this session's
+    established rule of not overselling scope.
+  - `scripts/generate_demo_dashboard_data.py` — populates a demo DuckDB store with a realistic mix of
+    mapped/unmapped users across all three providers, for exercising the dashboard without live vendor
+    credentials (none are available in this environment). Labeled clearly as sample data, not a real pull.
+  - `tests/metering/` — 13 tests: idempotent-insert behavior, aggregation correctness, fixed
+    provider-color ordering (including for a provider not in the fixed list), HTML-escaping of untrusted
+    fields, empty-store handling.
+  - Chargeback, full cost reconciliation, and the eventual Postgres-backed system of record
+    (`backend/gateway`) are still not built — this is the local/single-tenant analytics slice only, per
+    ADR 0003's intended scope for DuckDB.
+
 ## Stubbed / planned but not built
 
-- `backend/gateway` — AI usage collector (see `docs/02-architecture/system-overview.md`)
-- `backend/metering` — token counting, cost calculation, chargeback
+- `backend/gateway` — AI usage collector / Postgres-backed system of record (see
+  `docs/02-architecture/system-overview.md`); the local DuckDB analytics store above is not a substitute
+  for this, see `backend/metering/`'s note in "Implemented"
+- `backend/metering` — chargeback and full cost reconciliation beyond the DuckDB analytics slice already
+  built (see "Implemented" above)
 - `backend/governance` — policy engine
 - `backend/intelligence` — forecasting, anomaly detection, recommendations
 - `backend/connectors` — Okta/Entra, SAP, ServiceNow, Salesforce, Snowflake, MCP inventory, and the
-  remaining Tier 1 AI-provider connectors (Bedrock, GitHub Copilot) — Anthropic, OpenAI, and Azure OpenAI
-  are built, see above
-- `frontend/` — executive, engineering, and security dashboards
+  remaining Tier 1 AI-provider connectors (Bedrock, GitHub Copilot, Gemini/Vertex AI, existing-LLM-proxy
+  ingestion) — Anthropic, OpenAI, and Azure OpenAI are built, see above
+- `frontend/` — executive, engineering, and security dashboards (the static HTML dashboard in
+  `backend/metering/report.py` is a first cut at the "engineering" slice of this, not a replacement for
+  the eventual React app — no interactivity beyond a browser's native scroll/hover)
 
 ## Explicitly missing / not decided yet
 
@@ -152,21 +208,29 @@ re-deriving or re-litigating decisions.
 
 ## Next up
 
-1. Build the remaining Tier 1 AI-provider-admin-API connectors (Bedrock, GitHub Copilot) against the
-   shared interface in `backend/connectors/base.py` (see "Implemented" above and
-   `docs/02-architecture/connector-framework.md`'s "Connector interface" section) — `anthropic_admin.py`/
-   `openai_usage.py` are the reference for an aggregate-usage-report vendor shape, `azure_openai.py` for
-   a per-request-log vendor shape; Bedrock (CloudTrail-based) may turn out to need a fourth shape rather
-   than fitting either. Highest-adoption, lowest-friction path to real usage data; doesn't depend on the
-   gateway existing first.
-2. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md`,
-   using `demo-data/ai_events.csv` as a source to replay/ingest for local development. This now also
-   covers Tier 2 (proxy, scoped to raw SDK/CLI usage the admin-API connectors can't see) and is the path
-   real-time policy enforcement needs, per `connector-framework.md`.
-3. Build the metering engine and a minimal dashboard to close the loop end-to-end, consuming events from
-   both the Tier 1 connectors and the Tier 2 gateway.
-4. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
+The "immediately useful" wedge (Tier 1 connectors -> CLI -> DuckDB -> dashboard) is now real end-to-end
+for Anthropic/OpenAI/Azure OpenAI — see "Implemented" above. What's next, roughly in order:
+
+1. Widen Tier 1 provider coverage: Bedrock, GitHub Copilot, Google Gemini/Vertex AI, and an
+   "ingest from an existing LLM proxy" connector, against the shared interface in
+   `backend/connectors/base.py` — each slots into the existing CLI/dashboard automatically once built
+   (`cli.py`'s `build_connectors` just needs a new `elif` block per vendor). See
+   `docs/02-architecture/connector-framework.md`'s "Connector interface" and "Positioning relative to
+   LLM proxies" sections. Without this, AWS-heavy/Microsoft-365-heavy/GCP-heavy orgs get a confidently
+   presented but materially incomplete picture from the dashboard.
+2. A real cost-report join for at least one connector (OpenAI is the best-understood API shape) instead
+   of the approximate catalog estimate everywhere — proves that design before repeating it a third/fourth
+   time.
+3. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md` —
+   this is Tier 2 (real-time policy enforcement) and the eventual Postgres-backed system of record,
+   deliberately *not* a prerequisite for the visibility wedge above, per this session's "immediately
+   useful" pivot. `demo-data/ai_events.csv` remains a source to replay/ingest for local development.
+4. `specs/tenant-model.md`'s pooled-vs-siloed decision is a blocking dependency for #3's schema design —
+   not yet decided, the human's call.
+5. The cheapest real governance signal before a full policy engine: threshold alerts / non-approved-model
+   flags off the same DuckDB store the dashboard already reads — see `backend/governance`.
+6. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
    live and there's a concrete CASB target to integrate against.
-5. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
+7. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
    `simulation/README.md`'s suggested layout but not yet built — only needed if/when a second named
    scenario (not just "acme-corp") is required.

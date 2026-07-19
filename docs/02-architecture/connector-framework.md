@@ -7,8 +7,13 @@
 - **ITSM** — ServiceNow, for incident/policy-violation ticketing
 - **Data platforms** — Snowflake, Salesforce (as MCP-governed data sources)
 - **AI provider admin APIs** — Anthropic Admin API, OpenAI org usage API, Azure OpenAI diagnostics,
-  AWS Bedrock (via CloudTrail), GitHub Copilot Business/Enterprise admin API. See "How AI usage reaches
-  the platform" below.
+  AWS Bedrock (via CloudTrail), GitHub Copilot Business/Enterprise admin API, Google Gemini/Vertex AI
+  (via Cloud Billing export + Cloud Logging — same "no aggregate usage-report API" shape as Azure OpenAI,
+  not the OpenAI/Anthropic shape; see "How AI usage reaches the platform" below).
+- **Existing LLM proxies as a Tier 1 source** — if an org already runs an LLM gateway (LiteLLM, Portkey,
+  etc.) with per-employee virtual keys, ingest *from its spend-tracking API* as one more Tier 1 connector
+  rather than building a competing proxy. This is deliberately not this platform's own interception layer
+  — see "Positioning relative to LLM proxies" below.
 
 New connectors should implement the interface defined in `specs/api-contract.md` /
 `docs/02-architecture/connector-framework.md` rather than being bespoke one-offs.
@@ -20,11 +25,12 @@ exists only to cover what the tier above it can't see. Interception coverage is 
 new workflows for end users is.
 
 1. **Pull from vendor admin APIs (preferred, no client-side change).** For sanctioned AI vendors that
-   expose enterprise usage/admin APIs — Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, GitHub Copilot —
-   ingest usage as a `backend/connectors/` integration, the same pattern as the Okta/SAP/ServiceNow
-   connectors above. This requires no change to how engineers or business users work; it's purely a
-   platform-side API key configuration. This tier alone should cover most sanctioned usage and is
-   sufficient for metering/visibility, since it's read-only observability, not real-time enforcement.
+   expose enterprise usage/admin APIs — Anthropic, OpenAI, Azure OpenAI, Google Gemini/Vertex AI,
+   AWS Bedrock, GitHub Copilot — ingest usage as a `backend/connectors/` integration, the same pattern as
+   the Okta/SAP/ServiceNow connectors above. This requires no change to how engineers or business users
+   work; it's purely a platform-side API key configuration. This tier alone should cover most sanctioned
+   usage and is sufficient for metering/visibility, since it's read-only observability, not real-time
+   enforcement.
 2. **Proxy, scoped to the gap.** For raw SDK/CLI usage with no admin API, redirect via client-side base
    URL configuration (e.g. `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) pushed through existing IT channels
    (MDM shell profile, CI secrets) rather than a code change per tool. Use this only where Tier 1 doesn't
@@ -35,6 +41,25 @@ new workflows for end users is.
    or proxy, integrate with the enterprise's existing CASB/SASE tooling (e.g. Zscaler, Netskope) as a
    data source for `docs/04-simulation/`'s shadow-AI signal, rather than deploying a new browser
    extension or agent. Lower fidelity (domain/timestamp/bytes, not tokens/cost) but zero new rollout.
+
+## Positioning relative to LLM proxies (LiteLLM, Portkey, etc.)
+
+This platform does not build or operate its own network proxy/gateway in front of AI provider calls.
+That's a deliberate choice, not an oversight: `docs/00-product/non-goals.md` already scopes v1 away from
+real-time enforcement inside third-party providers, and a proxy is exactly the product LiteLLM/Portkey/
+Helicone already are — unified API, routing, fallback, spend tracking for whatever traffic is routed
+through them. Building a competing proxy means taking on their operational risk profile (added latency
+in the production call path, a new single point of failure, an ongoing obligation to track every
+provider's API changes) to re-solve a problem that's already a commodity in the OSS ecosystem.
+
+The one thing a network proxy genuinely does better than a Tier 1 admin-API connector is **attribution
+accuracy** — it can capture real per-call identity at the moment of the call, instead of reconstructing
+it after the fact from a vendor usage report that may not carry it at all (see `anthropic_admin.py`'s and
+`azure_openai.py`'s docstrings). The resolution is not to build that proxy ourselves: if an org already
+runs one with per-employee virtual keys, **ingest from its spend-tracking API as an additional Tier 1
+connector**, the same pattern as any vendor admin API. That inherits proxy-quality attribution when it
+exists, without owning the proxy, its latency cost, or the "why not just use the thing I already have"
+objection an enterprise running LiteLLM would reasonably raise against a second one.
 
 ## Connector interface (Tier 1: AI provider admin APIs)
 

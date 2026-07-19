@@ -28,9 +28,12 @@ real org; unverified since writing, same caveat as `anthropic_admin.py`:
 - **User attribution is better than Anthropic's but still not free.** OpenAI's usage rows can carry a
   `user_id`, which — when the org follows OpenAI's own recommended practice of one API key per member —
   identifies an OpenAI organization member, not this platform's `docs/01-domain/users.md`-style
-  `user_id`. It still needs a join (`openai_user_owner: openai user_id -> this platform's user_id`).
-  Rows with no `user_id` (shared/service API keys) fall back to a synthetic `project:<project_id>` id,
-  which then correctly fails department resolution via `UserDirectory` rather than guessing.
+  `user_id`. It still needs a join (`openai_user_owner: openai user_id -> this platform's user_id`,
+  keyed by either the OpenAI user id or the `api_key_id`). Rows with no `user_id` (shared/service API
+  keys) fall back to a synthetic `api_key:<api_key_id>` id — keyed by the finer-grained `api_key_id`
+  rather than `project_id`, since the usage report gives real per-key granularity even unmapped and
+  collapsing to project level would throw that away — which then correctly fails department resolution
+  via `UserDirectory` rather than guessing.
 - **`application_id`, `data_classification`, `mcp_tool_used` have no source in this API** — populated
   from static per-connector config, not invented per-event; `mcp_tool_used` is always `None` (MCP
   attribution comes from `docs/01-domain/mcp.md`'s own governance path).
@@ -132,7 +135,7 @@ class OpenAIUsageConnector(Connector):
         user_id = (
             (openai_user_id and self._config.openai_user_owner.get(openai_user_id))
             or self._config.openai_user_owner.get(api_key_id)
-            or f"project:{project_id}"
+            or f"api_key:{api_key_id}"
         )
 
         prompt_tokens = row.get("input_tokens", 0)  # already includes input_cached_tokens; see docstring

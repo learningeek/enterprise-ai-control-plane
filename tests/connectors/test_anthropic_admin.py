@@ -80,7 +80,7 @@ def connector():
             "claude-haiku-4-20250514": "anthropic-claude-haiku-4",
         },
     )
-    user_directory = InMemoryUserDirectory({"U000001": "Engineering", "workspace:wk_shared": "Unknown"})
+    user_directory = InMemoryUserDirectory({"U000001": "Engineering", "api_key:key_unmapped": "Unknown"})
     return AnthropicAdminConnector(
         admin_api_key="sk-ant-admin-test",
         config=config,
@@ -110,13 +110,34 @@ def test_pull_maps_known_api_key_to_configured_user(connector):
     assert alice_event.latency_ms == 0  # not reported by the aggregate usage API
 
 
-def test_pull_falls_back_to_synthetic_workspace_user_for_unmapped_api_key(connector):
+def test_pull_falls_back_to_synthetic_api_key_user_for_unmapped_key(connector):
     events = list(connector.pull(SINCE, UNTIL))
-    shared_event = next(e for e in events if e.user_id == "workspace:wk_shared")
-    assert shared_event.department == "Unknown"
+    unmapped_event = next(e for e in events if e.user_id == "api_key:key_unmapped")
+    assert unmapped_event.department == "Unknown"
 
 
-def test_pull_raises_when_workspace_user_is_not_in_directory():
+def test_pull_preserves_per_api_key_granularity_even_when_unmapped():
+    """Two different unmapped keys in the same workspace must not collapse into one synthetic id."""
+    config = AnthropicAdminConnectorConfig(
+        tenant_id="acme-corp",
+        application_id="claude-code",
+        model_id_map={
+            "claude-sonnet-4-20250514": "anthropic-claude-sonnet-4",
+            "claude-haiku-4-20250514": "anthropic-claude-haiku-4",
+        },
+    )
+    directory = InMemoryUserDirectory({"api_key:key_alice": "Unknown", "api_key:key_unmapped": "Unknown"})
+    connector = AnthropicAdminConnector(
+        admin_api_key="sk-ant-admin-test",
+        config=config,
+        user_directory=directory,
+        http_client=FakeHTTPClient(),
+    )
+    events = list(connector.pull(SINCE, UNTIL))
+    assert {e.user_id for e in events} == {"api_key:key_alice", "api_key:key_unmapped"}
+
+
+def test_pull_raises_when_api_key_user_is_not_in_directory():
     config = AnthropicAdminConnectorConfig(
         tenant_id="acme-corp",
         application_id="claude-code",
@@ -132,7 +153,7 @@ def test_pull_raises_when_workspace_user_is_not_in_directory():
         user_directory=empty_directory,
         http_client=FakeHTTPClient(),
     )
-    with pytest.raises(KeyError, match="workspace:wk_eng"):
+    with pytest.raises(KeyError, match="api_key:key_alice"):
         list(connector.pull(SINCE, UNTIL))
 
 

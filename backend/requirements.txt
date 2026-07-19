@@ -1,4 +1,6 @@
 pydantic>=2
+duckdb>=1
+pytz>=2024.1  # required by duckdb for TIMESTAMPTZ columns
 
 # test
 pytest>=8

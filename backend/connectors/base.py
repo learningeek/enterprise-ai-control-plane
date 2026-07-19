@@ -207,6 +207,29 @@ class InMemoryUserDirectory:
             ) from None
 
 
+class PermissiveUserDirectory:
+    """Wraps another UserDirectory, returning a fallback string instead of raising on lookup failure.
+
+    The strict directories above (`CSVUserDirectory`, `InMemoryUserDirectory`) deliberately fail loudly —
+    correct when department attribution is required to be trustworthy. But that also means a `Connector`
+    pull crashes entirely the moment *any* user/API key lacks a roster entry, which blocks running a
+    quickstart CLI/report before an org has fully built out its roster or API-key-ownership mapping (see
+    docs/02-architecture/connector-framework.md's "Connector interface"). This directory lets initial,
+    coarser-grained (per-API-key rather than per-department) visibility work immediately, while strict
+    resolution remains the default everywhere accuracy matters more than availability.
+    """
+
+    def __init__(self, wrapped: UserDirectory, fallback: str = "Unknown"):
+        self._wrapped = wrapped
+        self._fallback = fallback
+
+    def department_for(self, user_id: str) -> str:
+        try:
+            return self._wrapped.department_for(user_id)
+        except KeyError:
+            return self._fallback
+
+
 class JSONLSink:
     """Local-dev EventSink: appends newline-delimited AIUsageEvent JSON to a file."""
 
