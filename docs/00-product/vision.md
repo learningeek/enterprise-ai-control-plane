@@ -14,3 +14,11 @@ The Enterprise AI Control Plane gives enterprises a single place to answer:
 The differentiator is not another dashboard — it's an **Enterprise Digital Twin** of AI usage: a live
 model of departments, employees, applications, agents, MCP servers, models, budgets, and policies, that
 can answer "what if" questions (e.g. "what happens if Engineering switches from GPT-5 to a smaller model?").
+
+**Cost is the entry point, not the destination.** Token/cost aggregation alone is a commodity — vendor
+dashboards, cloud FinOps tools, and LLM gateways already do that reasonably well (see
+`docs/00-product/competitive-landscape.md`). What none of them do is attribute AI spend to a real owner
+inside the org and account for what's *not* attributable. The sharpest question this product should be
+able to answer isn't "what did we spend on AI" — it's "of that spend, how much can we explain, and how
+much is unowned, unregistered, or unaccounted for." That "Unknown" fraction is the differentiator and the
+urgency driver, not the total.

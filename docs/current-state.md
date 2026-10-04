@@ -209,28 +209,43 @@ re-deriving or re-litigating decisions.
 ## Next up
 
 The "immediately useful" wedge (Tier 1 connectors -> CLI -> DuckDB -> dashboard) is now real end-to-end
-for Anthropic/OpenAI/Azure OpenAI — see "Implemented" above. What's next, roughly in order:
+for Anthropic/OpenAI/Azure OpenAI — see "Implemented" above. Reordered per
+`docs/00-product/competitive-landscape.md`'s finding that attribution completeness (the "Unknown" bucket),
+not raw cost aggregation, is the sharper differentiator — pulling that forward ahead of provider breadth:
 
-1. Widen Tier 1 provider coverage: Bedrock, GitHub Copilot, Google Gemini/Vertex AI, and an
+1. **Make attribution completeness a headline dashboard metric**, not just the existing `(N unmapped)`
+   stat tile — e.g. "$X of $Y AI spend (Z%) is attributed to a known owner" as the lead number, with
+   unattributed spend broken out by provider. Cheap relative to its value: the data
+   (`department == "Unknown"`) already exists in `usage_summary()`; this is a `report.py` change, not new
+   ingestion. See `docs/00-product/vision.md`'s "cost is the entry point, not the destination."
+2. The cheapest real governance signal before a full policy engine: threshold alerts / non-approved-model
+   flags / cost-anomaly detection (e.g. "this key's spend increased 300% week-over-week") off the same
+   DuckDB store the dashboard already reads — see `backend/governance`. Pulled forward: this is a cheap,
+   concrete manifestation of "AI discovery," not just cost display.
+3. Widen Tier 1 provider coverage: Bedrock, GitHub Copilot, Google Gemini/Vertex AI, and an
    "ingest from an existing LLM proxy" connector, against the shared interface in
    `backend/connectors/base.py` — each slots into the existing CLI/dashboard automatically once built
    (`cli.py`'s `build_connectors` just needs a new `elif` block per vendor). See
-   `docs/02-architecture/connector-framework.md`'s "Connector interface" and "Positioning relative to
-   LLM proxies" sections. Without this, AWS-heavy/Microsoft-365-heavy/GCP-heavy orgs get a confidently
-   presented but materially incomplete picture from the dashboard.
-2. A real cost-report join for at least one connector (OpenAI is the best-understood API shape) instead
+   `docs/02-architecture/connector-framework.md`'s "Connector interface", "Positioning relative to LLM
+   proxies", and cloud-billing-export sections. Without this, AWS-heavy/Microsoft-365-heavy/GCP-heavy orgs
+   get a confidently presented but materially incomplete picture from the dashboard.
+4. A real cost-report join for at least one connector (OpenAI is the best-understood API shape) instead
    of the approximate catalog estimate everywhere — proves that design before repeating it a third/fourth
    time.
-3. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md` —
+5. **Open design question, not decided:** whether the flat `AIUsageEvent` model is sufficient long-term,
+   or whether attribution/governance eventually needs an explicit relationship model (employee -> app ->
+   agent -> MCP tool/data-source edges, not just per-request facts) — see
+   `docs/00-product/competitive-landscape.md`'s "AI asset graph" discussion. This would be a real data-model
+   expansion, not an additive tweak — `specs/event-schema.md` is an immutable v1 contract, so this needs a
+   deliberate versioned decision from the human owner, not something to build toward speculatively.
+6. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md` —
    this is Tier 2 (real-time policy enforcement) and the eventual Postgres-backed system of record,
    deliberately *not* a prerequisite for the visibility wedge above, per this session's "immediately
    useful" pivot. `demo-data/ai_events.csv` remains a source to replay/ingest for local development.
-4. `specs/tenant-model.md`'s pooled-vs-siloed decision is a blocking dependency for #3's schema design —
+7. `specs/tenant-model.md`'s pooled-vs-siloed decision is a blocking dependency for #6's schema design —
    not yet decided, the human's call.
-5. The cheapest real governance signal before a full policy engine: threshold alerts / non-approved-model
-   flags off the same DuckDB store the dashboard already reads — see `backend/governance`.
-6. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
+8. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
    live and there's a concrete CASB target to integrate against.
-7. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
+9. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
    `simulation/README.md`'s suggested layout but not yet built — only needed if/when a second named
    scenario (not just "acme-corp") is required.
