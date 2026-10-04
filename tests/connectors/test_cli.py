@@ -99,6 +99,44 @@ def test_build_connectors_raises_clearly_on_missing_env_var(monkeypatch):
         build_connectors(config, InMemoryUserDirectory({}), http_client_factory=lambda: FakeHTTPClient())
 
 
+def test_build_connectors_accepts_a_literal_secret_with_no_env_var_set(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_ADMIN_API_KEY", raising=False)
+    config = {
+        "global": {"tenant_id": "acme-corp"},
+        "connectors": {
+            "anthropic": {"enabled": True, "admin_api_key": "sk-ant-admin-literal", "application_id": "app"},
+        },
+    }
+    connectors = build_connectors(config, InMemoryUserDirectory({}), http_client_factory=lambda: FakeHTTPClient())
+    assert "anthropic" in connectors
+
+
+def test_build_connectors_prefers_literal_secret_over_env_var(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_ADMIN_API_KEY", "from-env")
+    config = {
+        "global": {"tenant_id": "acme-corp"},
+        "connectors": {
+            "anthropic": {
+                "enabled": True,
+                "admin_api_key": "from-literal",
+                "admin_api_key_env": "ANTHROPIC_ADMIN_API_KEY",
+                "application_id": "app",
+            },
+        },
+    }
+    connectors = build_connectors(config, InMemoryUserDirectory({}), http_client_factory=lambda: FakeHTTPClient())
+    assert connectors["anthropic"]._admin_api_key == "from-literal"
+
+
+def test_build_connectors_raises_clearly_when_neither_secret_form_is_set():
+    config = {
+        "global": {"tenant_id": "acme-corp"},
+        "connectors": {"anthropic": {"enabled": True, "application_id": "app"}},
+    }
+    with pytest.raises(SystemExit, match="admin_api_key"):
+        build_connectors(config, InMemoryUserDirectory({}), http_client_factory=lambda: FakeHTTPClient())
+
+
 def test_build_connectors_builds_all_three_vendor_types(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_ADMIN_API_KEY", "a")
     monkeypatch.setenv("OPENAI_ADMIN_API_KEY", "b")
@@ -244,3 +282,47 @@ def test_run_report_reads_duckdb_path_from_config_and_writes_html(tmp_path):
     html = output_path.read_text()
     assert "api_key:key_1" in html
     assert "Anthropic" in html
+
+
+# --- load_config's permission warning for literal secrets -------------------------------------------
+
+
+def test_load_config_warns_when_literal_secret_and_permissions_too_open(tmp_path, capsys):
+    config_path = tmp_path / "connectors.toml"
+    config_path.write_text(
+        '[global]\ntenant_id = "acme-corp"\n'
+        '[connectors.anthropic]\nenabled = true\nadmin_api_key = "sk-ant-admin-literal"\n'
+    )
+    config_path.chmod(0o644)  # group/other readable
+
+    load_config(config_path)
+
+    err = capsys.readouterr().err
+    assert "readable beyond its owner" in err
+    assert str(config_path) in err
+
+
+def test_load_config_does_not_warn_when_permissions_are_owner_only(tmp_path, capsys):
+    config_path = tmp_path / "connectors.toml"
+    config_path.write_text(
+        '[global]\ntenant_id = "acme-corp"\n'
+        '[connectors.anthropic]\nenabled = true\nadmin_api_key = "sk-ant-admin-literal"\n'
+    )
+    config_path.chmod(0o600)
+
+    load_config(config_path)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_load_config_does_not_warn_when_no_literal_secret_present(tmp_path, capsys):
+    config_path = tmp_path / "connectors.toml"
+    config_path.write_text(
+        '[global]\ntenant_id = "acme-corp"\n'
+        '[connectors.anthropic]\nenabled = true\nadmin_api_key_env = "ANTHROPIC_ADMIN_API_KEY"\n'
+    )
+    config_path.chmod(0o644)  # world-readable, but no secret literally in the file — nothing to warn about
+
+    load_config(config_path)
+
+    assert capsys.readouterr().err == ""

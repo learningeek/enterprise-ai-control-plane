@@ -9,15 +9,22 @@ Usage:
     python -m backend.connectors.cli sync --config connectors.toml
     python -m backend.connectors.cli sync --config connectors.toml --since 2026-06-01 --until 2026-07-01
 
-Config format: see `connectors.example.toml` at the repo root. Secrets are never stored in the config
-file itself — each connector section names an environment variable to read the admin key/token from at
-runtime, not the secret value directly.
+Config format: see `connectors.example.toml` at the repo root. Each connector section accepts a secret
+either of two ways — an environment variable name (`admin_api_key_env` / `aad_bearer_token_env`, the
+recommended default: nothing sensitive ever touches disk in this file) or a literal value
+(`admin_api_key` / `aad_bearer_token`) for enterprises whose internal process is to distribute a
+self-contained config through an already-secured channel (their own secrets manager, an encrypted share,
+etc.). If both are present, the literal value wins. Whichever form is used, `connectors.toml` itself
+stays out of git (see `.gitignore`) — and if it contains a literal secret, `load_config` warns to stderr
+if the file's permissions are wider than owner-only, since a shareable config carrying real credentials
+is exactly the kind of file worth checking that on.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import tomllib
 from collections.abc import Callable
@@ -51,9 +58,55 @@ class _NoUserDirectoryConfigured:
         )
 
 
+_SECRET_LITERAL_FIELDS = ("admin_api_key", "aad_bearer_token")
+
+
+def _contains_literal_secret(config: dict) -> bool:
+    return any(
+        section.get(field)
+        for section in config.get("connectors", {}).values()
+        for field in _SECRET_LITERAL_FIELDS
+    )
+
+
+def _warn_if_permissions_are_too_open(path: Path) -> None:
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        print(
+            f"warning: {path} contains a literal credential and is readable beyond its owner "
+            f"(mode {oct(mode & 0o777)}) — consider `chmod 600 {path}`",
+            file=sys.stderr,
+        )
+
+
 def load_config(path: Path) -> dict:
     with path.open("rb") as f:
-        return tomllib.load(f)
+        config = tomllib.load(f)
+    if _contains_literal_secret(config):
+        _warn_if_permissions_are_too_open(path)
+    return config
+
+
+def _resolve_secret(cfg: dict, connector_name: str, direct_field: str, env_field: str) -> str:
+    """Resolves a secret from a literal config value or a named env var — literal wins if both are set.
+
+    Prefer the env-var form (`{env_field}`) where possible; the literal form (`{direct_field}`) exists
+    for enterprises whose own process already handles distributing a config file with real credentials
+    securely — see this module's docstring.
+    """
+    literal = cfg.get(direct_field)
+    if literal:
+        return literal
+    env_var_name = cfg.get(env_field)
+    if env_var_name:
+        return _require_env(env_var_name, connector_name)
+    raise SystemExit(
+        f"[connectors.{connector_name}] needs either {direct_field!r} (a literal value) or "
+        f"{env_field!r} (an environment variable name) — neither is set"
+    )
 
 
 def build_user_directory(config: dict) -> UserDirectory:
@@ -84,7 +137,7 @@ def build_connectors(
 
     anthropic_cfg = connectors_config.get("anthropic", {})
     if anthropic_cfg.get("enabled"):
-        api_key = _require_env(anthropic_cfg["admin_api_key_env"], "anthropic")
+        api_key = _resolve_secret(anthropic_cfg, "anthropic", "admin_api_key", "admin_api_key_env")
         built["anthropic"] = AnthropicAdminConnector(
             admin_api_key=api_key,
             config=AnthropicAdminConnectorConfig(
@@ -100,7 +153,7 @@ def build_connectors(
 
     openai_cfg = connectors_config.get("openai", {})
     if openai_cfg.get("enabled"):
-        api_key = _require_env(openai_cfg["admin_api_key_env"], "openai")
+        api_key = _resolve_secret(openai_cfg, "openai", "admin_api_key", "admin_api_key_env")
         built["openai"] = OpenAIUsageConnector(
             admin_api_key=api_key,
             config=OpenAIUsageConnectorConfig(
@@ -116,7 +169,7 @@ def build_connectors(
 
     azure_cfg = connectors_config.get("azure_openai", {})
     if azure_cfg.get("enabled"):
-        token = _require_env(azure_cfg["aad_bearer_token_env"], "azure_openai")
+        token = _resolve_secret(azure_cfg, "azure_openai", "aad_bearer_token", "aad_bearer_token_env")
         built["azure_openai"] = AzureOpenAIConnector(
             aad_bearer_token=token,
             config=AzureOpenAIConnectorConfig(

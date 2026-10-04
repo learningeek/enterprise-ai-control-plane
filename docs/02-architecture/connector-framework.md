@@ -7,9 +7,17 @@
 - **ITSM** — ServiceNow, for incident/policy-violation ticketing
 - **Data platforms** — Snowflake, Salesforce (as MCP-governed data sources)
 - **AI provider admin APIs** — Anthropic Admin API, OpenAI org usage API, Azure OpenAI diagnostics,
-  AWS Bedrock (via CloudTrail), GitHub Copilot Business/Enterprise admin API, Google Gemini/Vertex AI
-  (via Cloud Billing export + Cloud Logging — same "no aggregate usage-report API" shape as Azure OpenAI,
-  not the OpenAI/Anthropic shape; see "How AI usage reaches the platform" below).
+  AWS Bedrock, GitHub Copilot Business/Enterprise admin API, Google Gemini/Vertex AI (via Cloud Billing
+  export + Cloud Logging — same "no aggregate usage-report API" shape as Azure OpenAI, not the
+  OpenAI/Anthropic shape; see "How AI usage reaches the platform" below).
+- **Cloud billing/cost export as an alternative Tier 1 source** — AWS Cost Explorer/CUR, Azure Cost
+  Management export, GCP Billing export. For providers with no clean per-request usage-report API
+  (Bedrock, Gemini/Vertex AI), this is likely a cleaner cost source than piecing usage together from
+  CloudTrail/Cloud Logging request logs — coarser-grained (no per-request token counts) but reliably
+  gives real dollar cost without the `ApproximateCatalogCostEstimator` fallback the other connectors need.
+  This is the approach CloudZero and similar cloud-cost-management tools use; see
+  `docs/00-product/competitive-landscape.md`. Not yet built — evaluate against CloudTrail-based usage
+  when the Bedrock connector is built, rather than assuming one is strictly better.
 - **Existing LLM proxies as a Tier 1 source** — if an org already runs an LLM gateway (LiteLLM, Portkey,
   etc.) with per-employee virtual keys, ingest *from its spend-tracking API* as one more Tier 1 connector
   rather than building a competing proxy. This is deliberately not this platform's own interception layer
@@ -98,3 +106,19 @@ a separate cost-report join. Document these per-connector-module, not in this sh
 Vendor-specific mapping notes (e.g. how an Anthropic Admin API usage record's fields line up with
 `AIUsageEvent`) belong in each connector module's docstring, not here — this file stays about the shared
 shape, not per-vendor detail.
+
+## Credential handling in the CLI config
+
+`backend/connectors/cli.py`'s TOML config accepts each connector's secret two ways: an environment
+variable name (`admin_api_key_env` / `aad_bearer_token_env` — the default in `connectors.example.toml`,
+nothing sensitive touches disk in the config file itself) or a literal value (`admin_api_key` /
+`aad_bearer_token`) for enterprises whose internal process is to distribute one self-contained config
+file through an already-secured channel — a secrets manager, an encrypted share — rather than have every
+person set their own environment variables. The literal form wins if both are present.
+
+Either way, `connectors.toml` (the file a real org actually fills in, as opposed to the checked-in
+`connectors.example.toml` template) is gitignored, and `load_config` warns to stderr if a config
+containing a literal secret has permissions wider than owner-only. This doesn't make embedding real
+credentials in a file safe by default — it's a floor, not a guarantee: the file still needs to be
+treated as a secret artifact by whatever channel actually moves it between people (not emailed, not
+pasted into chat, not stored in a shared drive without access control).

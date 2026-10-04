@@ -1,7 +1,17 @@
 # Example config for `python -m backend.connectors.cli sync --config connectors.toml`.
 # Copy this file to connectors.toml (gitignored) and fill in your own org's values.
-# Secrets are never written here directly — each *_env key names an environment variable to read the
-# actual admin key/token from at runtime.
+#
+# Each connector accepts its secret two ways:
+#   - `..._env` (shown below): names an environment variable to read the real value from at runtime.
+#     Recommended default — nothing sensitive ever touches disk in this file.
+#   - `admin_api_key` / `aad_bearer_token` (literal value, not shown below): put the real credential
+#     directly in this file, for enterprises whose internal process is to distribute a self-contained
+#     config through an already-secured channel (a secrets manager, an encrypted share, etc.). If both
+#     forms are present, the literal value wins.
+# Whichever form you use: connectors.toml itself is gitignored, and if it carries a literal secret,
+# `python -m backend.connectors.cli` will warn you if the file's permissions are wider than
+# owner-only (`chmod 600 connectors.toml` to fix). Never commit this file, email it, or paste it into a
+# chat, even though it's gitignored — gitignore only protects it from *this* repo's history.
 
 [global]
 tenant_id = "acme-corp"
