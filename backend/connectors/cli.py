@@ -112,7 +112,13 @@ def _resolve_secret(cfg: dict, connector_name: str, direct_field: str, env_field
 def build_user_directory(config: dict) -> UserDirectory:
     global_config = config.get("global", {})
     users_csv = global_config.get("users_csv")
-    directory: UserDirectory = CSVUserDirectory(Path(users_csv)) if users_csv else _NoUserDirectoryConfigured()
+    if users_csv:
+        try:
+            directory: UserDirectory = CSVUserDirectory(Path(users_csv))
+        except FileNotFoundError:
+            raise SystemExit(f"[global] users_csv={users_csv!r} does not exist") from None
+    else:
+        directory = _NoUserDirectoryConfigured()
     if global_config.get("permissive_directory", True):
         directory = PermissiveUserDirectory(directory)
     return directory
@@ -130,9 +136,14 @@ def build_connectors(
     user_directory: UserDirectory,
     http_client_factory: Callable[[], HTTPClient] | None = None,
 ) -> dict[str, Connector]:
+    """Builds one Connector per enabled [connectors.*] section.
+
+    Calls `http_client_factory()` separately for each connector (not once, shared) — a factory producing
+    a stateful client (e.g. a test fake that records calls) must not have its state silently shared
+    across unrelated vendors just because they happened to be enabled in the same run.
+    """
     tenant_id = config["global"]["tenant_id"]
     connectors_config = config.get("connectors", {})
-    http_client = http_client_factory() if http_client_factory else None
     built: dict[str, Connector] = {}
 
     anthropic_cfg = connectors_config.get("anthropic", {})
@@ -148,7 +159,7 @@ def build_connectors(
                 model_id_map=anthropic_cfg.get("model_id_map", {}),
             ),
             user_directory=user_directory,
-            http_client=http_client,
+            http_client=http_client_factory() if http_client_factory else None,
         )
 
     openai_cfg = connectors_config.get("openai", {})
@@ -164,7 +175,7 @@ def build_connectors(
                 model_id_map=openai_cfg.get("model_id_map", {}),
             ),
             user_directory=user_directory,
-            http_client=http_client,
+            http_client=http_client_factory() if http_client_factory else None,
         )
 
     azure_cfg = connectors_config.get("azure_openai", {})
@@ -181,7 +192,7 @@ def build_connectors(
                 deployment_model_id_map=azure_cfg.get("deployment_model_id_map", {}),
             ),
             user_directory=user_directory,
-            http_client=http_client,
+            http_client=http_client_factory() if http_client_factory else None,
         )
 
     return built

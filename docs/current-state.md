@@ -120,20 +120,48 @@ re-deriving or re-litigating decisions.
     - Model/deployment id mapping is keyed differently: Anthropic/OpenAI map a raw vendor model version
       string (e.g. `"gpt-4o-2024-08-06"`); Azure maps an org-chosen deployment name (e.g. `"gpt4o-prod"`,
       arbitrary per org, independent of the underlying model) via the same `ModelIdResolver`.
-    - Field/schema assumptions for all three should be re-verified against current vendor docs (and, for
-      Azure, the org's actual diagnostic export) before pointing any of them at a real org — noted
-      explicitly in each docstring as unverified-since-writing.
+    - **Verified against each vendor's current published docs on 2026-10-19** (no live account was
+      available to test against — see docstrings for the "docs vs. live behavior can still diverge"
+      caveat that remains). Found and fixed three real, confirmed bugs: (1) both Anthropic's and OpenAI's
+      connectors sent `group_by[0]=`/`group_by[1]=`-style indexed query keys, which matches neither
+      vendor's actual array-param convention (fixed — see `base.HTTPClient`'s new `params` type above);
+      (2) Anthropic's connector read a flat `cache_creation_input_tokens` field that no longer exists —
+      the real API nests it as `cache_creation: {ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}` —
+      silently undercounting `prompt_tokens`/cost whenever cache creation occurred, since the stale key
+      name just returned the `.get()` default of `0` instead of erroring; (3) both connectors' null-vs-
+      missing handling for `api_key_id`/`workspace_id`/`project_id` was wrong — these fields can be an
+      explicit JSON `null` (confirmed: Console/Workbench playground usage, the default workspace,
+      ungrouped dimensions), and `row.get(key, "")` only applies its default for a *missing* key, not a
+      present key with value `None` — would have produced a literal `"api_key:None"` user_id. All three
+      have regression tests. Also updated Azure's default `base_url` to the newly-documented canonical
+      host `api.loganalytics.azure.com` (was `api.loganalytics.io`, still Microsoft's own CLI/PowerShell
+      example variable name, likely still functional, but no longer the primary documented host).
+      **Still genuinely unconfirmed, flagged prominently in `openai_usage.py`'s docstring:** the exact
+      encoding for OpenAI's `group_by` with *multiple* simultaneous values — secondary sources disagreed
+      (comma-separated vs. repeated keys), and one unofficial source claims `api_key_id`+`user_id` can't
+      be grouped together at all. The connector currently guesses comma-separated; if a live call 400s,
+      this is the first thing to check. **Also found, not yet acted on:** Anthropic's usage report has an
+      `account_id` field that's a real per-human identifier for OAuth-authenticated calls (unlike
+      API-key-based calls, which is the typical enterprise pattern) — a potential future attribution
+      improvement, noted in `anthropic_admin.py`'s docstring but not implemented since its availability
+      for a given org's actual traffic is unconfirmed. **Also found:** Claude Enterprise (claude.ai team
+      plans) uses an entirely separate "Analytics API" with its own "Analytics API key" credential type —
+      `anthropic_admin.py` targets Claude Console orgs only; a claude.ai Enterprise org would need a
+      different connector entirely. This directly resolves an earlier open question from this project's
+      session history about whether claude.ai usage is trackable the same way.
   - `backend/connectors/base.py` also has **`PermissiveUserDirectory`** — wraps another `UserDirectory`
     and returns `"Unknown"` instead of raising when department can't be resolved. The strict directories
     still fail loudly by default (correct when accuracy matters); this exists so the CLI/dashboard below
     can run *before* an org has done any roster/ownership-mapping setup, rather than crashing on the
     first unmapped key.
-  - `tests/connectors/` — 35 tests, all passing, using a fake `HTTPClient` per connector (no live API
+  - `tests/connectors/` — 59 tests, all passing, using a fake `HTTPClient` per connector (no live API
     calls, no network dependency): pagination (or its absence, for Azure), token-field mapping,
     unmapped-user fallback + failure behavior (including that per-API-key granularity is preserved, not
     collapsed to workspace/project level, when unmapped), unmapped-model failure behavior,
-    status-code-to-outcome mapping (Azure), event-id determinism (needed for idempotent re-pulls), and
-    cost-estimator correctness.
+    status-code-to-outcome mapping (Azure), event-id determinism (needed for idempotent re-pulls),
+    cost-estimator correctness, the `group_by[]`-repeated-key encoding, and the three doc-verification
+    regression tests described above (nested `cache_creation` summing, explicit-null field handling for
+    both Anthropic and OpenAI).
   - **Not yet built:** AWS Bedrock, GitHub Copilot, Google Gemini/Vertex AI connectors (same interface,
     new module each — the three existing connectors are the references to follow; Gemini/Vertex AI is
     expected to need `azure_openai.py`'s shape, not `anthropic_admin.py`'s/`openai_usage.py`'s — see
@@ -156,9 +184,21 @@ re-deriving or re-litigating decisions.
   .venv/bin/python -m backend.connectors.cli report --config connectors.toml
   ```
   `sync` runs every enabled connector into a `DuckDBEventSink`; `report` regenerates the dashboard from
-  whatever's in that store. Smoke-tested against the real Anthropic endpoint with an invalid key during
-  this session — reached the real API and got a real `401`, confirming the request construction is
+  whatever's in that store. Smoke-tested against the real Anthropic, OpenAI, and Azure Log Analytics
+  endpoints with deliberately invalid credentials — all three reached the real API and got a real `401`,
+  confirming the request construction (including the new query-encoding and base-URL fixes below) is
   correct, not just internally self-consistent against test fakes.
+
+  **Two more real bugs found in a 2026-10-19 code review pass** (independent of the doc-verification pass
+  above): `build_connectors()` was creating one `http_client_factory()` instance and sharing it across
+  all enabled connectors rather than one per connector — harmless today since nothing stateful is passed
+  in production, but a latent footgun for any future stateful client; fixed to call the factory once per
+  connector. And `usage_summary()` (and therefore `report`) crashed with a raw DuckDB
+  `CatalogException` if run against a path `sync` had never touched — fixed to create the table first,
+  so an uninitialized store returns `[]` cleanly. Also: a misconfigured/typo'd `users_csv` path produced
+  a raw `FileNotFoundError` instead of the clear `SystemExit` every other config-misconfiguration case in
+  `cli.py` produces — fixed to match. All three have regression tests (80 total across `tests/connectors/`
+  and `tests/metering/`).
 
 - **`backend/metering/`** — first real slice built, not just a README anymore:
   - `duckdb_store.py` — `DuckDBEventSink` (`EventSink` implementation, DuckDB per ADR 0003), inserts

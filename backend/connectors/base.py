@@ -7,6 +7,11 @@ implementing `Connector`, not a new pattern.
 `HTTPClient` is a minimal Protocol rather than a dependency on `requests`/`httpx`, so this module has
 no third-party dependency beyond pydantic (already used by `simulation/`) — `UrllibHTTPClient` below is
 a stdlib-only default adapter; swap in a real client for retries/connection pooling in production.
+
+`HTTPClient.get()`'s `params` is a `Sequence[tuple[str, str]]`, not a `Mapping[str, str]` — a repeated
+query key (e.g. Anthropic's `group_by[]=workspace_id&group_by[]=model`) can't be represented in a dict,
+where duplicate keys silently collapse to one. A connector building an array-type query parameter must
+append one `(key, value)` tuple per value, not stuff multiple values into one dict key.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from __future__ import annotations
 import csv
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -69,7 +74,7 @@ class EventSink(Protocol):
 
 
 class HTTPClient(Protocol):
-    def get(self, url: str, *, params: Mapping[str, str], headers: Mapping[str, str]) -> dict: ...
+    def get(self, url: str, *, params: Sequence[tuple[str, str]], headers: Mapping[str, str]) -> dict: ...
 
     def post(self, url: str, *, json_body: Mapping[str, object], headers: Mapping[str, str]) -> dict: ...
 
@@ -157,7 +162,9 @@ class Connector(ABC):
 class UrllibHTTPClient:
     """Stdlib-only HTTPClient adapter — sufficient for a handful of authenticated GETs/POSTs."""
 
-    def get(self, url: str, *, params: Mapping[str, str], headers: Mapping[str, str]) -> dict:
+    def get(self, url: str, *, params: Sequence[tuple[str, str]], headers: Mapping[str, str]) -> dict:
+        # urlencode() accepts a sequence of (key, value) pairs natively — this is what lets a repeated
+        # key (e.g. multiple group_by[] entries) survive encoding instead of collapsing like a dict would.
         full_url = f"{url}?{urlencode(params)}" if params else url
         request = Request(full_url, headers=dict(headers))
         with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed https vendor endpoints only

@@ -120,8 +120,13 @@ def usage_summary(db_path: str | Path) -> list[dict]:
     ownership mapping, otherwise a connector's synthetic per-API-key/deployment id (see
     `anthropic_admin.py`/`openai_usage.py`/`azure_openai.py`) — so this is accurately a per-API-key
     breakdown until an org does that mapping work, not silently a per-employee one.
+
+    Ensures the table exists before querying — calling this on a DuckDB file path that was never
+    touched by `DuckDBEventSink` (e.g. running `report` before ever running `sync`) returns `[]` rather
+    than raising a raw `CatalogException: Table ... does not exist`.
     """
     with duckdb.connect(str(db_path)) as conn:
+        conn.execute(_CREATE_TABLE_SQL)
         rows = conn.execute(_USAGE_SUMMARY_SQL).fetchall()
         columns = [description[0] for description in conn.description]
     return [dict(zip(columns, row)) for row in rows]

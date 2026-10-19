@@ -10,8 +10,12 @@ not just a copy with renamed fields** — worth reading before assuming symmetry
 - Azure OpenAI has no equivalent of Anthropic's/OpenAI's aggregate usage-report REST endpoint. Usage data
   comes from whatever the org's Azure Monitor **diagnostic settings** export for the Azure OpenAI
   resource, queried via the Log Analytics Query API
-  (`POST https://api.loganalytics.io/v1/workspaces/{workspace_id}/query` with a KQL query body) — a POST
-  carrying a query string, not a paginated GET.
+  (`POST https://api.loganalytics.azure.com/v1/workspaces/{workspace_id}/query` with a KQL query body) —
+  a POST carrying a query string, not a paginated GET. **Base URL confirmed/updated as of 2026-10-19**:
+  Microsoft's own request-format docs now document `api.loganalytics.azure.com` as the canonical public
+  endpoint host; `api.loganalytics.io` (this connector's previous default) still appears in Microsoft's
+  own CLI/PowerShell examples as the AAD resource-audience value, so it's likely still functional, but
+  the newly-documented host is the safer default going forward.
 - **The exact raw log schema depends entirely on the org's diagnostic settings configuration** (which log
   categories are enabled, whether export lands in the legacy `AzureDiagnostics` table or a
   resource-specific table) — unlike Anthropic's/OpenAI's nominally-stable public usage-report shape, this
@@ -96,7 +100,7 @@ class AzureOpenAIConnectorConfig:
     application_id: str
     workspace_id: str
     default_data_classification: str = "internal"
-    base_url: str = "https://api.loganalytics.io"
+    base_url: str = "https://api.loganalytics.azure.com"
     deployment_owner: Mapping[str, str] = field(default_factory=dict)  # deployment_name -> user_id
     deployment_model_id_map: Mapping[str, str] = field(default_factory=dict)  # deployment_name -> catalog model_id
     kql_query_template: str = DEFAULT_KQL_QUERY_TEMPLATE

@@ -5,19 +5,34 @@ Pulls organization-level usage from OpenAI's Usage API and maps it onto `AIUsage
 an org admin API key (an owner-role key on the organization, not a per-project key — usage/cost reporting
 endpoints are org-scoped).
 
-Mapping notes — verify field names against the current OpenAI Usage API docs before pointing this at a
-real org; unverified since writing, same caveat as `anthropic_admin.py`:
+Mapping notes — **partially verified against OpenAI's published docs/cookbook as of 2026-10-19**:
 
 - `GET /v1/organization/usage/completions` returns time-bucketed usage rows (`start_time`/`end_time` as
-  unix seconds, not ISO8601 — unlike Anthropic's usage report), grouped by `project_id` / `user_id` /
-  `api_key_id` / `model`, with `input_tokens`, `input_cached_tokens`, `output_tokens`,
-  `num_model_requests`.
+  unix seconds, not ISO8601 — unlike Anthropic's usage report), with `input_tokens`, `input_cached_tokens`,
+  `output_tokens`, `num_model_requests`, and grouping/context fields `project_id` / `user_id` /
+  `api_key_id` / `model` / `batch`. **Confirmed** directly from OpenAI's own cookbook example JSON.
 - `prompt_tokens` = `input_tokens` directly. Unlike Anthropic's usage report — where uncached/
   cache-creation/cache-read are three *disjoint* pools that must be summed — OpenAI's `input_tokens` is
   already the total, and `input_cached_tokens` is a *subset* of it reported separately only so cost can
   be split by cache-hit discount. Adding them here would double-count; this is a real, easy-to-get-wrong
   difference between the two vendors' APIs, not an oversight.
 - `completion_tokens` = `output_tokens`.
+- **`project_id`/`api_key_id` can plausibly be an explicit JSON `null`** when not grouping by that
+  dimension (confirmed as the behavior for Anthropic's equivalent fields; OpenAI's docs say ungrouped
+  dimensions "return as null" too) — `row.get(key) or ""`, not `row.get(key, "")`, handles both the
+  missing-key and the explicit-null case; only the former actually hits the default in a plain
+  `.get(key, default)` call.
+- **The `group_by` query parameter's exact encoding for *multiple* simultaneous values is genuinely
+  unconfirmed** — this is the single most important thing to verify against a live account before
+  trusting this connector's grouping. Secondary sources disagree: one says comma-separated
+  (`group_by=model,project_id`), the Python cookbook passes a list (which `requests`'s default encoder
+  would serialize as repeated `group_by=model&group_by=project_id` keys, no brackets), and a third,
+  unofficial, source claims `api_key_id` and `user_id` cannot be grouped together in the same request at
+  all (each only combines with `model` individually). None of these were confirmed from an unambiguous,
+  directly-quoted official example showing >1 group_by value. This connector currently sends a single
+  comma-joined `group_by` value as its best guess — **if a live call 400s, this parameter is the first
+  thing to check**, and splitting into separate per-dimension calls may be required if the
+  api_key_id/user_id mutual-exclusivity claim turns out to be real.
 - **`request_cost` is not on the usage report.** OpenAI exposes actual dollar cost via a separate
   `GET /v1/organization/costs` endpoint. Not yet joined here (see `TODO` on `OpenAIUsageConnector`) —
   cost is estimated via the shared `ApproximateCatalogCostEstimator`
@@ -103,17 +118,16 @@ class OpenAIUsageConnector(Connector):
         until = until or datetime.now(timezone.utc)
         page: str | None = None
         while True:
-            params = {
-                "start_time": str(int(since.timestamp())),
-                "end_time": str(int(until.timestamp())),
-                "bucket_width": "1d",
-                "group_by[0]": "project_id",
-                "group_by[1]": "user_id",
-                "group_by[2]": "api_key_id",
-                "group_by[3]": "model",
-            }
+            # group_by's multi-value encoding is unconfirmed — see module docstring. A single
+            # comma-joined value is this connector's best guess among conflicting secondary sources.
+            params: list[tuple[str, str]] = [
+                ("start_time", str(int(since.timestamp()))),
+                ("end_time", str(int(until.timestamp()))),
+                ("bucket_width", "1d"),
+                ("group_by", "project_id,user_id,api_key_id,model"),
+            ]
             if page:
-                params["page"] = page
+                params.append(("page", page))
             body = self._http.get(
                 f"{self._config.base_url}{USAGE_REPORT_PATH}",
                 params=params,
@@ -129,9 +143,11 @@ class OpenAIUsageConnector(Connector):
                 break
 
     def _to_event(self, bucket: dict, row: dict) -> AIUsageEvent:
-        project_id = row.get("project_id", "")
+        # .get(key) or "" (not .get(key, "")) because an ungrouped dimension can be an explicit JSON
+        # null, not just absent — see module docstring.
+        project_id = row.get("project_id") or ""
         openai_user_id = row.get("user_id")
-        api_key_id = row.get("api_key_id", "")
+        api_key_id = row.get("api_key_id") or ""
         user_id = (
             (openai_user_id and self._config.openai_user_owner.get(openai_user_id))
             or self._config.openai_user_owner.get(api_key_id)

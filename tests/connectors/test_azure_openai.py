@@ -66,7 +66,7 @@ def connector():
 def test_pull_posts_kql_query_to_workspace_endpoint(connector):
     list(connector.pull(SINCE, UNTIL))
     assert len(connector._http.calls) == 1
-    assert connector._http.calls[0]["url"] == "https://api.loganalytics.io/v1/workspaces/ws-123/query"
+    assert connector._http.calls[0]["url"] == "https://api.loganalytics.azure.com/v1/workspaces/ws-123/query"
 
 
 def test_pull_maps_all_rows(connector):

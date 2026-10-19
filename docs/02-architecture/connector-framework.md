@@ -82,6 +82,12 @@ pattern:
   with a `GET` — e.g. `azure_openai.py` queries a Log Analytics workspace via KQL over `POST`, with no
   pagination at all — so `HTTPClient` supports both `get` and `post`; a `Connector` uses whichever its
   vendor's actual API requires rather than forcing every vendor through one HTTP shape.
+  `HTTPClient.get()`'s `params` is a `Sequence[tuple[str, str]]`, not a `Mapping[str, str]` — a real bug
+  found when verifying the Anthropic/OpenAI connectors against their vendors' current published docs
+  (2026-10-19): both connectors were building `group_by[0]=`/`group_by[1]=`-style indexed query keys,
+  which matches neither Anthropic's confirmed `group_by[]=x&group_by[]=y` repeated-key convention nor
+  OpenAI's. A `Mapping` can't represent repeated keys at all, which is what let the bug exist unnoticed —
+  fixed by changing the shared type.
 - **`UserDirectory`** — a lookup (`user_id -> department`, `cost_center`, etc.) that a Tier 1 connector
   depends on to fill `AIUsageEvent.department`, per `docs/01-domain/users.md`: "users are synced from the
   customer's SSO, not manually managed." An AI-provider connector never invents department data itself —

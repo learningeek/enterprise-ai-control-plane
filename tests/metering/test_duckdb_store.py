@@ -95,3 +95,10 @@ def test_usage_summary_tracks_first_and_last_seen(db_path):
 def test_usage_summary_on_empty_store_returns_empty_list(db_path):
     DuckDBEventSink(db_path)
     assert usage_summary(db_path) == []
+
+
+def test_usage_summary_on_a_db_path_never_touched_by_the_sink_returns_empty_list_not_an_error(db_path):
+    """Regression test: running `report` before ever running `sync` must not crash with a raw
+    DuckDB CatalogException — usage_summary() must create the table itself if missing."""
+    assert not db_path.exists()
+    assert usage_summary(db_path) == []

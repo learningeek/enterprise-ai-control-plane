@@ -68,6 +68,15 @@ def test_build_user_directory_without_users_csv_is_permissive_by_default():
     assert directory.department_for("anyone") == "Unknown"
 
 
+def test_build_user_directory_raises_a_clear_error_for_a_nonexistent_users_csv_path(tmp_path):
+    """Regression test: a typo'd users_csv path previously crashed with a raw FileNotFoundError
+    instead of the clear SystemExit every other config-misconfiguration case in this module produces."""
+    missing_path = tmp_path / "does-not-exist.csv"
+    config = {"global": {"users_csv": str(missing_path)}}
+    with pytest.raises(SystemExit, match="does not exist"):
+        build_user_directory(config)
+
+
 # --- build_connectors -------------------------------------------------
 
 

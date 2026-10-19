@@ -23,9 +23,11 @@ class FakeHTTPClient:
         self.requests: list[dict] = []
 
     def get(self, url, *, params, headers):
-        self.requests.append({"url": url, "params": dict(params), "headers": dict(headers)})
+        params = list(params)
+        self.requests.append({"url": url, "params": params, "headers": dict(headers)})
+        params_by_key = dict(params)
         assert headers["x-api-key"] == "sk-ant-admin-test"
-        page = params.get("page")
+        page = params_by_key.get("page")
         if page is None:
             return {
                 "data": [
@@ -37,7 +39,10 @@ class FakeHTTPClient:
                                 "api_key_id": "key_alice",
                                 "model": "claude-sonnet-4-20250514",
                                 "uncached_input_tokens": 800,
-                                "cache_creation_input_tokens": 0,
+                                "cache_creation": {
+                                    "ephemeral_1h_input_tokens": 0,
+                                    "ephemeral_5m_input_tokens": 0,
+                                },
                                 "cache_read_input_tokens": 200,
                                 "output_tokens": 500,
                             }
@@ -57,7 +62,10 @@ class FakeHTTPClient:
                                 "api_key_id": "key_unmapped",
                                 "model": "claude-haiku-4-20250514",
                                 "uncached_input_tokens": 100,
-                                "cache_creation_input_tokens": 0,
+                                "cache_creation": {
+                                    "ephemeral_1h_input_tokens": 0,
+                                    "ephemeral_5m_input_tokens": 0,
+                                },
                                 "cache_read_input_tokens": 0,
                                 "output_tokens": 50,
                             }
@@ -92,7 +100,14 @@ def connector():
 def test_pull_follows_pagination_and_maps_all_rows(connector):
     events = list(connector.pull(SINCE, UNTIL))
     assert len(events) == 2
-    assert connector._http.requests[1]["params"]["page"] == "page-2"
+    assert dict(connector._http.requests[1]["params"])["page"] == "page-2"
+
+
+def test_pull_encodes_group_by_as_repeated_keys_not_indexed(connector):
+    """group_by[]=x repeated per official docs, not group_by[0]=x/group_by[1]=y (a real bug this fixes)."""
+    list(connector.pull(SINCE, UNTIL))
+    group_by_values = [value for key, value in connector._http.requests[0]["params"] if key == "group_by[]"]
+    assert group_by_values == ["workspace_id", "api_key_id", "model"]
 
 
 def test_pull_maps_known_api_key_to_configured_user(connector):
@@ -179,6 +194,93 @@ def test_sync_pulls_then_emits(connector):
     count = connector.sync(sink, SINCE, UNTIL)
     assert count == 2
     assert len(sink.events) == 2
+
+
+def test_prompt_tokens_sums_nested_cache_creation_sub_fields():
+    """Regression test: an earlier version assumed a flat cache_creation_input_tokens field that no
+    longer exists in the real API — cache_creation is a nested object with two sub-fields, and silently
+    reading the old flat key via .get(key, 0) would undercount prompt_tokens/cost without erroring."""
+
+    class SingleRowHTTPClient:
+        def get(self, url, *, params, headers):
+            return {
+                "data": [
+                    {
+                        "starting_at": "2026-06-15T00:00:00Z",
+                        "results": [
+                            {
+                                "workspace_id": "wk_eng",
+                                "api_key_id": "key_alice",
+                                "model": "claude-sonnet-4-20250514",
+                                "uncached_input_tokens": 800,
+                                "cache_creation": {
+                                    "ephemeral_1h_input_tokens": 50,
+                                    "ephemeral_5m_input_tokens": 30,
+                                },
+                                "cache_read_input_tokens": 200,
+                                "output_tokens": 500,
+                            }
+                        ],
+                    }
+                ],
+                "next_page": None,
+            }
+
+    config = AnthropicAdminConnectorConfig(
+        tenant_id="acme-corp",
+        application_id="claude-code",
+        api_key_owner={"key_alice": "U000001"},
+        model_id_map={"claude-sonnet-4-20250514": "anthropic-claude-sonnet-4"},
+    )
+    connector = AnthropicAdminConnector(
+        admin_api_key="sk-ant-admin-test",
+        config=config,
+        user_directory=InMemoryUserDirectory({"U000001": "Engineering"}),
+        http_client=SingleRowHTTPClient(),
+    )
+    event = next(iter(connector.pull(SINCE, UNTIL)))
+    assert event.prompt_tokens == 800 + (50 + 30) + 200
+
+
+def test_handles_explicit_null_api_key_id_without_crashing():
+    """Regression test: Console/Workbench playground usage has api_key_id: null (present, not missing) —
+    row.get("api_key_id", "") doesn't apply its default for an explicit null, only a missing key."""
+
+    class PlaygroundUsageHTTPClient:
+        def get(self, url, *, params, headers):
+            return {
+                "data": [
+                    {
+                        "starting_at": "2026-06-15T00:00:00Z",
+                        "results": [
+                            {
+                                "workspace_id": None,
+                                "api_key_id": None,
+                                "model": "claude-sonnet-4-20250514",
+                                "uncached_input_tokens": 10,
+                                "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0},
+                                "cache_read_input_tokens": 0,
+                                "output_tokens": 5,
+                            }
+                        ],
+                    }
+                ],
+                "next_page": None,
+            }
+
+    config = AnthropicAdminConnectorConfig(
+        tenant_id="acme-corp",
+        application_id="claude-code",
+        model_id_map={"claude-sonnet-4-20250514": "anthropic-claude-sonnet-4"},
+    )
+    connector = AnthropicAdminConnector(
+        admin_api_key="sk-ant-admin-test",
+        config=config,
+        user_directory=InMemoryUserDirectory({"api_key:": "Unknown"}),
+        http_client=PlaygroundUsageHTTPClient(),
+    )
+    event = next(iter(connector.pull(SINCE, UNTIL)))
+    assert event.user_id == "api_key:"  # not the "api_key:None" bug an earlier version would have produced
 
 
 def test_cost_estimator_matches_shared_pricing_catalog():

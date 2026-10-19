@@ -23,9 +23,11 @@ class FakeHTTPClient:
         self.requests: list[dict] = []
 
     def get(self, url, *, params, headers):
-        self.requests.append({"url": url, "params": dict(params), "headers": dict(headers)})
+        params = list(params)
+        self.requests.append({"url": url, "params": params, "headers": dict(headers)})
+        params_by_key = dict(params)
         assert headers["Authorization"] == "Bearer sk-openai-admin-test"
-        page = params.get("page")
+        page = params_by_key.get("page")
         if page is None:
             return {
                 "data": [
@@ -91,7 +93,13 @@ def connector():
 def test_pull_follows_pagination_and_maps_all_rows(connector):
     events = list(connector.pull(SINCE, UNTIL))
     assert len(events) == 2
-    assert connector._http.requests[1]["params"]["page"] == "page-2"
+    assert dict(connector._http.requests[1]["params"])["page"] == "page-2"
+
+
+def test_pull_sends_group_by_as_a_single_comma_joined_value(connector):
+    """Best-guess encoding per module docstring — flagged there as unconfirmed against a live account."""
+    list(connector.pull(SINCE, UNTIL))
+    assert dict(connector._http.requests[0]["params"])["group_by"] == "project_id,user_id,api_key_id,model"
 
 
 def test_pull_maps_known_openai_user_to_configured_user(connector):
@@ -148,3 +156,43 @@ def test_sync_pulls_then_emits(connector):
     count = connector.sync(sink, SINCE, UNTIL)
     assert count == 2
     assert len(sink.events) == 2
+
+
+def test_handles_explicit_null_project_and_api_key_id_without_crashing():
+    """Regression test: an ungrouped dimension can be an explicit JSON null, not just absent —
+    row.get(key, "") doesn't apply its default for an explicit null, only a missing key."""
+
+    class UngroupedHTTPClient:
+        def get(self, url, *, params, headers):
+            return {
+                "data": [
+                    {
+                        "start_time": 1780000000,
+                        "results": [
+                            {
+                                "project_id": None,
+                                "user_id": None,
+                                "api_key_id": None,
+                                "model": "gpt-4o-2024-08-06",
+                                "input_tokens": 10,
+                                "input_cached_tokens": 0,
+                                "output_tokens": 5,
+                            }
+                        ],
+                    }
+                ],
+                "has_more": False,
+                "next_page": None,
+            }
+
+    config = OpenAIUsageConnectorConfig(
+        tenant_id="acme-corp", application_id="internal-copilot", model_id_map=MODEL_ID_MAP
+    )
+    connector = OpenAIUsageConnector(
+        admin_api_key="sk-openai-admin-test",
+        config=config,
+        user_directory=InMemoryUserDirectory({"api_key:": "Unknown"}),
+        http_client=UngroupedHTTPClient(),
+    )
+    event = next(iter(connector.pull(SINCE, UNTIL)))
+    assert event.user_id == "api_key:"  # not the "api_key:None" bug an earlier version would have produced
