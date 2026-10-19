@@ -52,15 +52,53 @@ def _provider_color(provider: str, dark: bool) -> str:
     return table.get(provider, fallback)
 
 
+def _fixed_provider_order(names: set[str]) -> list[str]:
+    """Known providers first, in PROVIDER_COLOR_ORDER's fixed order; unrecognized ones appended, sorted."""
+    known_order = [name for name, _l, _d in PROVIDER_COLOR_ORDER if name in names]
+    other = sorted(name for name in names if name not in dict((n, 1) for n, _l, _d in PROVIDER_COLOR_ORDER))
+    return known_order + other
+
+
 def _aggregate_by_provider(rows: list[dict]) -> list[tuple[str, Decimal]]:
     totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for row in rows:
         totals[row["provider"]] += row["total_cost"]
-    # fixed provider order first (only those present), anything unrecognized appended at the end
-    known_order = [name for name, _l, _d in PROVIDER_COLOR_ORDER if name in totals]
-    other = sorted(name for name in totals if name not in dict((n, 1) for n, _l, _d in PROVIDER_COLOR_ORDER))
-    ordered = known_order + other
-    return [(name, totals[name]) for name in ordered]
+    return [(name, totals[name]) for name in _fixed_provider_order(set(totals))]
+
+
+def aggregate_attribution(rows: list[dict]) -> dict:
+    """Splits total cost into attributed (known department) vs. unattributed ("Unknown" department).
+
+    This is the headline metric per docs/00-product/vision.md's "cost is the entry point, not the
+    destination" — what fraction of AI spend can be explained, not just what the total is. A row counts
+    as attributed iff its department isn't the literal "Unknown" PermissiveUserDirectory/CSVUserDirectory
+    fallback value (see backend/connectors/base.py) — this is a department-resolution signal, not a
+    judgment about whether the underlying user_id is a real employee vs. a synthetic api_key:/deployment:
+    id, though in practice the two currently coincide for every connector built so far.
+    """
+    attributed_cost = Decimal("0")
+    unattributed_cost = Decimal("0")
+    unattributed_by_provider: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+
+    for row in rows:
+        if row["department"] == "Unknown":
+            unattributed_cost += row["total_cost"]
+            unattributed_by_provider[row["provider"]] += row["total_cost"]
+        else:
+            attributed_cost += row["total_cost"]
+
+    total_cost = attributed_cost + unattributed_cost
+    pct_attributed = float(attributed_cost / total_cost * 100) if total_cost > 0 else None
+
+    return {
+        "attributed_cost": attributed_cost,
+        "unattributed_cost": unattributed_cost,
+        "total_cost": total_cost,
+        "pct_attributed": pct_attributed,
+        "unattributed_by_provider": [
+            (name, unattributed_by_provider[name]) for name in _fixed_provider_order(set(unattributed_by_provider))
+        ],
+    }
 
 
 def _bar_row(label: str, value: Decimal, max_value: Decimal, color: str, sublabel: str = "") -> str:
@@ -86,6 +124,8 @@ def render_html(rows: list[dict], generated_at: datetime | None = None) -> str:
     unique_keys = len({row["user_id"] for row in rows})
     unmapped_keys = len({row["user_id"] for row in rows if row["department"] == "Unknown"})
 
+    attribution = aggregate_attribution(rows)
+
     provider_totals = _aggregate_by_provider(rows)
     max_provider_cost = max((cost for _name, cost in provider_totals), default=Decimal("0"))
 
@@ -104,6 +144,26 @@ def render_html(rows: list[dict], generated_at: datetime | None = None) -> str:
         f'<span class="legend-item"><span class="legend-swatch" style="background:{_provider_color(name, dark=False)}"></span>{html.escape(name)}</span>'
         for name, _cost in provider_totals
     )
+
+    unattributed_by_provider = attribution["unattributed_by_provider"]
+    max_unattributed_cost = max((cost for _name, cost in unattributed_by_provider), default=Decimal("0"))
+    unattributed_bars_light = "".join(
+        _bar_row(name, cost, max_unattributed_cost, _provider_color(name, dark=False))
+        for name, cost in unattributed_by_provider
+    )
+
+    pct_attributed = attribution["pct_attributed"]
+    if pct_attributed is None:
+        hero_value = "—"
+        hero_sub = "No spend recorded yet."
+        meter_pct = 0.0
+    else:
+        hero_value = f"{pct_attributed:.1f}%"
+        hero_sub = (
+            f"{_fmt_money(attribution['attributed_cost'])} of {_fmt_money(attribution['total_cost'])} AI spend "
+            f"is attributed to a known owner; {_fmt_money(attribution['unattributed_cost'])} is not."
+        )
+        meter_pct = pct_attributed
 
     table_rows = "".join(
         f"""
@@ -220,6 +280,24 @@ h1 {{ font-size: 22px; margin: 0 0 4px; }}
 .bar-fill {{ height: 24px; border-radius: 0 4px 4px 0; min-width: 2px; }}
 .bar-value {{ margin-left: 8px; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }}
 
+.attribution-panel {{ display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }}
+.attribution-hero {{ min-width: 220px; }}
+.hero-figure {{ font-size: 56px; font-weight: 600; line-height: 1.1; }}
+.hero-sub {{ font-size: 13px; color: var(--text-secondary); margin-top: 8px; max-width: 320px; }}
+.meter {{ margin-top: 14px; width: 220px; }}
+.meter-track {{ height: 10px; border-radius: 5px; background: rgba(42,120,214,0.16); overflow: hidden; }}
+@media (prefers-color-scheme: dark) {{
+  :root:where(:not([data-theme="light"])) .meter-track {{ background: rgba(57,135,229,0.22); }}
+}}
+:root[data-theme="dark"] .meter-track {{ background: rgba(57,135,229,0.22); }}
+.meter-fill {{ height: 10px; border-radius: 5px; background: #2a78d6; }}
+@media (prefers-color-scheme: dark) {{
+  :root:where(:not([data-theme="light"])) .meter-fill {{ background: #3987e5; }}
+}}
+:root[data-theme="dark"] .meter-fill {{ background: #3987e5; }}
+.attribution-breakdown {{ flex: 1; min-width: 280px; }}
+.attribution-breakdown h3 {{ font-size: 12px; font-weight: 500; color: var(--text-secondary); margin: 0 0 12px; }}
+
 table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; }}
 th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gridline); }}
 th {{ color: var(--text-secondary); font-weight: 500; font-size: 12px; }}
@@ -242,6 +320,23 @@ footer {{ color: var(--text-muted); font-size: 12px; margin-top: 24px; }}
       usage report, and department shows <strong>Unknown</strong> rather than a guess. This is
       per-API-key visibility, not per-employee attribution, until that mapping work is done — see
       docs/02-architecture/connector-framework.md.
+    </div>
+
+    <div class="panel">
+      <h2>AI spend attribution</h2>
+      <div class="sub">What fraction of AI spend is tied to a known owner, vs. not — the headline number,
+      not just the total.</div>
+      <div class="attribution-panel">
+        <div class="attribution-hero">
+          <div class="hero-figure">{hero_value}</div>
+          <div class="hero-sub">{html.escape(hero_sub)}</div>
+          <div class="meter"><div class="meter-track"><div class="meter-fill" style="width:{meter_pct:.1f}%"></div></div></div>
+        </div>
+        <div class="attribution-breakdown">
+          <h3>Unattributed spend by provider</h3>
+          {unattributed_bars_light if unattributed_bars_light else '<div class="hero-sub">None — every tracked key/user currently resolves to a known department.</div>'}
+        </div>
+      </div>
     </div>
 
     <div class="stat-grid">

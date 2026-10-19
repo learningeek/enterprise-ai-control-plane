@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from backend.metering.report import PROVIDER_COLOR_ORDER, _aggregate_by_provider, render_html
+from backend.metering.report import PROVIDER_COLOR_ORDER, _aggregate_by_provider, aggregate_attribution, render_html
 
 
 def make_row(**overrides) -> dict:
@@ -87,3 +87,61 @@ def test_render_html_escapes_untrusted_looking_values():
     output = render_html(rows)
     assert "<script>alert(1)</script>" not in output
     assert "&lt;script&gt;" in output
+
+
+# --- aggregate_attribution ---------------------------------------------------------------------
+
+
+def test_aggregate_attribution_splits_known_vs_unknown_department():
+    rows = [
+        make_row(department="Engineering", total_cost=Decimal("3.00")),
+        make_row(department="Unknown", total_cost=Decimal("1.00")),
+    ]
+    attribution = aggregate_attribution(rows)
+    assert attribution["attributed_cost"] == Decimal("3.00")
+    assert attribution["unattributed_cost"] == Decimal("1.00")
+    assert attribution["total_cost"] == Decimal("4.00")
+    assert attribution["pct_attributed"] == 75.0
+
+
+def test_aggregate_attribution_returns_none_pct_when_no_spend():
+    assert aggregate_attribution([])["pct_attributed"] is None
+    assert aggregate_attribution([])["total_cost"] == Decimal("0")
+
+
+def test_aggregate_attribution_is_100_percent_when_nothing_is_unattributed():
+    rows = [make_row(department="Engineering", total_cost=Decimal("5.00"))]
+    attribution = aggregate_attribution(rows)
+    assert attribution["pct_attributed"] == 100.0
+    assert attribution["unattributed_by_provider"] == []
+
+
+def test_aggregate_attribution_breaks_down_unattributed_by_provider_in_fixed_order():
+    rows = [
+        make_row(provider="Azure OpenAI", department="Unknown", total_cost=Decimal("2.00")),
+        make_row(provider="Anthropic", department="Unknown", total_cost=Decimal("1.00")),
+        make_row(provider="Anthropic", department="Engineering", total_cost=Decimal("9.00")),  # attributed, excluded
+    ]
+    attribution = aggregate_attribution(rows)
+    assert attribution["unattributed_by_provider"] == [
+        ("Anthropic", Decimal("1.00")),
+        ("Azure OpenAI", Decimal("2.00")),
+    ]
+    assert attribution["unattributed_cost"] == Decimal("3.00")
+    assert attribution["attributed_cost"] == Decimal("9.00")
+
+
+def test_render_html_shows_attribution_hero_figure():
+    rows = [
+        make_row(department="Engineering", total_cost=Decimal("3.00")),
+        make_row(department="Unknown", total_cost=Decimal("1.00")),
+    ]
+    output = render_html(rows)
+    assert "75.0%" in output
+    assert "$3.00 of $4.00" in output
+
+
+def test_render_html_handles_zero_spend_attribution_without_crashing():
+    output = render_html([])
+    assert "No spend recorded yet." in output
+    assert "—" in output

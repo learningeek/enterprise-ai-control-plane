@@ -166,20 +166,29 @@ re-deriving or re-litigating decisions.
     over an overlapping window is safe and doesn't double-count — this is `Connector.pull()`'s
     idempotency requirement actually being relied on, not just asserted in a connector test). Plus
     `usage_summary()`, a query helper aggregating by `(user_id, department, provider, model)`.
-  - `report.py` — renders `usage_summary()`'s output as a self-contained static HTML dashboard (stat
-    tiles, cost-by-provider bar chart, top-API-keys-by-cost bar chart, full sortable table), built per
+  - `report.py` — renders `usage_summary()`'s output as a self-contained static HTML dashboard, built per
     this project's dataviz skill (fixed categorical color order by provider — never reassigned based on
-    which providers are present in a given store; `html.escape()` on every user-controlled field). Leads
-    with an explicit banner: `user_id` is a real employee only where an org has done the ownership-mapping
-    setup, otherwise a synthetic `api_key:<id>`/`deployment:<name>` id with `department="Unknown"` — the
-    dashboard does not imply more attribution completeness than the data actually has, per this session's
-    established rule of not overselling scope.
+    which providers are present in a given store; `html.escape()` on every user-controlled field):
+    - **`aggregate_attribution()` + the "AI spend attribution" panel** — the headline metric per
+      `docs/00-product/vision.md`'s "cost is the entry point, not the destination" and
+      `docs/00-product/competitive-landscape.md`'s finding that attribution completeness, not raw cost
+      aggregation, is the sharper differentiator. Leads the dashboard (above the stat grid) with a hero
+      figure (`"71.4%"` of spend attributed to a known owner), a meter, and an unattributed-spend-by-
+      provider breakdown — not just the existing `(N unmapped)` stat tile buried lower on the page.
+      Handles zero-spend (`pct_attributed=None`, renders `"—"` / "No spend recorded yet." rather than
+      dividing by zero) and the fully-attributed case (no breakdown bars, explicit "None" message) without
+      crashing.
+    - Cost-by-provider bar chart, top-API-keys-by-cost bar chart, full sortable table (unchanged from the
+      prior pass) — plus the existing attribution-scope banner explaining what `user_id`/`department`
+      actually mean (see prior note: real employee only where ownership mapping is configured, otherwise
+      synthetic `api_key:<id>`/`deployment:<name>` with `department="Unknown"`).
   - `scripts/generate_demo_dashboard_data.py` — populates a demo DuckDB store with a realistic mix of
     mapped/unmapped users across all three providers, for exercising the dashboard without live vendor
     credentials (none are available in this environment). Labeled clearly as sample data, not a real pull.
-  - `tests/metering/` — 13 tests: idempotent-insert behavior, aggregation correctness, fixed
+  - `tests/metering/` — 19 tests: idempotent-insert behavior, aggregation correctness, fixed
     provider-color ordering (including for a provider not in the fixed list), HTML-escaping of untrusted
-    fields, empty-store handling.
+    fields, empty-store handling, and `aggregate_attribution()`'s split/percentage/zero-spend/
+    fully-attributed/provider-breakdown-ordering behavior.
   - Chargeback, full cost reconciliation, and the eventual Postgres-backed system of record
     (`backend/gateway`) are still not built — this is the local/single-tenant analytics slice only, per
     ADR 0003's intended scope for DuckDB.
@@ -208,44 +217,38 @@ re-deriving or re-litigating decisions.
 
 ## Next up
 
-The "immediately useful" wedge (Tier 1 connectors -> CLI -> DuckDB -> dashboard) is now real end-to-end
-for Anthropic/OpenAI/Azure OpenAI — see "Implemented" above. Reordered per
-`docs/00-product/competitive-landscape.md`'s finding that attribution completeness (the "Unknown" bucket),
-not raw cost aggregation, is the sharper differentiator — pulling that forward ahead of provider breadth:
+The "immediately useful" wedge (Tier 1 connectors -> CLI -> DuckDB -> dashboard, with attribution
+completeness as the dashboard's headline metric) is now real end-to-end for Anthropic/OpenAI/Azure
+OpenAI — see "Implemented" above. What's left, roughly in order:
 
-1. **Make attribution completeness a headline dashboard metric**, not just the existing `(N unmapped)`
-   stat tile — e.g. "$X of $Y AI spend (Z%) is attributed to a known owner" as the lead number, with
-   unattributed spend broken out by provider. Cheap relative to its value: the data
-   (`department == "Unknown"`) already exists in `usage_summary()`; this is a `report.py` change, not new
-   ingestion. See `docs/00-product/vision.md`'s "cost is the entry point, not the destination."
-2. The cheapest real governance signal before a full policy engine: threshold alerts / non-approved-model
+1. The cheapest real governance signal before a full policy engine: threshold alerts / non-approved-model
    flags / cost-anomaly detection (e.g. "this key's spend increased 300% week-over-week") off the same
-   DuckDB store the dashboard already reads — see `backend/governance`. Pulled forward: this is a cheap,
-   concrete manifestation of "AI discovery," not just cost display.
-3. Widen Tier 1 provider coverage: Bedrock, GitHub Copilot, Google Gemini/Vertex AI, and an
+   DuckDB store the dashboard already reads — see `backend/governance`. This is a cheap, concrete
+   manifestation of "AI discovery," not just cost display.
+2. Widen Tier 1 provider coverage: Bedrock, GitHub Copilot, Google Gemini/Vertex AI, and an
    "ingest from an existing LLM proxy" connector, against the shared interface in
    `backend/connectors/base.py` — each slots into the existing CLI/dashboard automatically once built
    (`cli.py`'s `build_connectors` just needs a new `elif` block per vendor). See
    `docs/02-architecture/connector-framework.md`'s "Connector interface", "Positioning relative to LLM
    proxies", and cloud-billing-export sections. Without this, AWS-heavy/Microsoft-365-heavy/GCP-heavy orgs
    get a confidently presented but materially incomplete picture from the dashboard.
-4. A real cost-report join for at least one connector (OpenAI is the best-understood API shape) instead
+3. A real cost-report join for at least one connector (OpenAI is the best-understood API shape) instead
    of the approximate catalog estimate everywhere — proves that design before repeating it a third/fourth
    time.
-5. **Open design question, not decided:** whether the flat `AIUsageEvent` model is sufficient long-term,
+4. **Open design question, not decided:** whether the flat `AIUsageEvent` model is sufficient long-term,
    or whether attribution/governance eventually needs an explicit relationship model (employee -> app ->
    agent -> MCP tool/data-source edges, not just per-request facts) — see
    `docs/00-product/competitive-landscape.md`'s "AI asset graph" discussion. This would be a real data-model
    expansion, not an additive tweak — `specs/event-schema.md` is an immutable v1 contract, so this needs a
    deliberate versioned decision from the human owner, not something to build toward speculatively.
-6. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md` —
+5. Stand up `backend/gateway` per `docs/02-architecture/system-overview.md` and `specs/event-schema.md` —
    this is Tier 2 (real-time policy enforcement) and the eventual Postgres-backed system of record,
    deliberately *not* a prerequisite for the visibility wedge above, per this session's "immediately
    useful" pivot. `demo-data/ai_events.csv` remains a source to replay/ingest for local development.
-7. `specs/tenant-model.md`'s pooled-vs-siloed decision is a blocking dependency for #6's schema design —
+6. `specs/tenant-model.md`'s pooled-vs-siloed decision is a blocking dependency for #5's schema design —
    not yet decided, the human's call.
-8. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
+7. Tier 3 (CASB/SASE integration for shadow-AI detection) — lower priority, evaluate once Tiers 1-2 are
    live and there's a concrete CASB target to integrate against.
-9. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
+8. `simulation/scenarios/` (named enterprise scenarios beyond the single default profile) is listed in
    `simulation/README.md`'s suggested layout but not yet built — only needed if/when a second named
    scenario (not just "acme-corp") is required.
