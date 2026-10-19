@@ -154,14 +154,34 @@ re-deriving or re-litigating decisions.
     still fail loudly by default (correct when accuracy matters); this exists so the CLI/dashboard below
     can run *before* an org has done any roster/ownership-mapping setup, rather than crashing on the
     first unmapped key.
-  - `tests/connectors/` — 59 tests, all passing, using a fake `HTTPClient` per connector (no live API
+  - `tests/connectors/` — 64 tests, all passing, using a fake `HTTPClient` per connector (no live API
     calls, no network dependency): pagination (or its absence, for Azure), token-field mapping,
     unmapped-user fallback + failure behavior (including that per-API-key granularity is preserved, not
     collapsed to workspace/project level, when unmapped), unmapped-model failure behavior,
     status-code-to-outcome mapping (Azure), event-id determinism (needed for idempotent re-pulls),
-    cost-estimator correctness, the `group_by[]`-repeated-key encoding, and the three doc-verification
+    cost-estimator correctness, the `group_by[]`-repeated-key encoding, and the doc-verification
     regression tests described above (nested `cache_creation` summing, explicit-null field handling for
     both Anthropic and OpenAI).
+  - **`tests/connectors/fixtures/` + `test_real_fixtures.py`** — since no live account was available,
+    this is the closest substitute: **literal example responses copied verbatim from each vendor's own
+    public docs** (not hand-rolled by this project), parsed through the actual connectors. This caught a
+    fourth real bug beyond the doc-verification pass above — `vendor_model = row.get("model", "unknown")`
+    had the exact same null-vs-missing gap already fixed for `api_key_id`/`workspace_id`/`project_id`,
+    just not applied to `model` — found specifically because OpenAI's own cookbook example (ungrouped)
+    has `model: null`, which the existing hand-rolled test fakes never happened to exercise since they
+    always supplied a model value. Fixed to `row.get("model") or "unknown"` in both connectors, with a
+    regression test asserting the real OpenAI example now fails with a clear "unmapped model 'unknown'"
+    error instead of a confusing crash. Also confirmed, via the real Anthropic example, that an
+    authentic vendor response for a model outside `simulation/`'s catalog still fails loudly rather than
+    silently miscounting cost.
+  - **Found but not acted on (Azure):** Microsoft's monitoring-data-reference docs reveal an
+    `AzureOpenAIRequestUsage` log category — same `AzureDiagnostics` table as the `RequestResponse`
+    category `DEFAULT_KQL_QUERY_TEMPLATE` currently filters on, but explicitly documented as
+    cost-exportable and purpose-built for token usage, which sounds like a better fit than the
+    general-purpose `RequestResponse` tracing category. Not switched to by default since no literal
+    example row for that category's column schema was found — flagged prominently in
+    `azure_openai.py`'s docstring as the first thing to try when verifying this connector against a real
+    org's export.
   - **Not yet built:** AWS Bedrock, GitHub Copilot, Google Gemini/Vertex AI connectors (same interface,
     new module each — the three existing connectors are the references to follow; Gemini/Vertex AI is
     expected to need `azure_openai.py`'s shape, not `anthropic_admin.py`'s/`openai_usage.py`'s — see

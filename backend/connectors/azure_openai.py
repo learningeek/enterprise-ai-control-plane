@@ -24,9 +24,18 @@ not just a copy with renamed fields** — worth reading before assuming symmetry
   contract** instead: `kql_query_template` must `project` these columns, however the org's actual schema
   maps to them — `time_generated`, `deployment_name`, `prompt_tokens`, `completion_tokens`, `status_code`,
   `correlation_id`, and optionally `end_user` / `duration_ms`. `DEFAULT_KQL_QUERY_TEMPLATE` below is an
-  illustrative starting point against the commonly-documented `AzureDiagnostics` table — explicitly not
-  guaranteed to match a given org's export configuration, and should be replaced via
-  `AzureOpenAIConnectorConfig.kql_query_template` once it is.
+  illustrative starting point against the commonly-documented `AzureDiagnostics` table, filtered to the
+  `RequestResponse` log category — explicitly not guaranteed to match a given org's export configuration,
+  and should be replaced via `AzureOpenAIConnectorConfig.kql_query_template` once it is.
+  **Found while checking Microsoft's current monitoring-data-reference docs (2026-10-19), not yet acted
+  on in the default template:** Azure OpenAI resources also support an `AzureOpenAIRequestUsage` log
+  category (same `AzureDiagnostics` table), explicitly documented as cost-exportable and purpose-built
+  for token usage — a more targeted fit for what this connector needs than the general-purpose
+  `RequestResponse` category used below, which is request/response tracing, not usage-specific. Its
+  exact column schema is unconfirmed (no literal example row was found, only the category's existence and
+  intended purpose), so the default template wasn't changed to it — but when verifying this connector
+  against a real org's export, trying `Category == "AzureOpenAIRequestUsage"` first is worth doing before
+  falling back to `RequestResponse`.
 - **Per-request granularity, not aggregate buckets.** Diagnostic logs are one row per request, so unlike
   the other two connectors this one *can* report a real `latency_ms` (from an optional `duration_ms`
   column, if the org's schema captures request duration) and a real `outcome` derived from `status_code`

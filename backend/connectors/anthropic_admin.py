@@ -176,7 +176,13 @@ class AnthropicAdminConnector(Connector):
             row.get("uncached_input_tokens", 0) + cache_creation_tokens + row.get("cache_read_input_tokens", 0)
         )
         completion_tokens = row.get("output_tokens", 0)
-        vendor_model = row.get("model", "unknown")
+        # .get("model") or "unknown" (not .get("model", "unknown")) — model is null, not absent, when the
+        # request isn't grouped by it (confirmed: OpenAI's own cookbook example shows this for every
+        # ungrouped dimension; same null-vs-missing gap as api_key_id/workspace_id above). This connector
+        # always includes "model" in group_by, so this shouldn't trigger in practice — it's a defensive
+        # fix so a future group_by change fails with a clear "unmapped model 'unknown'" error rather than
+        # a confusing KeyError on a literal None.
+        vendor_model = row.get("model") or "unknown"
         model = self._model_resolver.resolve(vendor_model)
 
         return AIUsageEvent(

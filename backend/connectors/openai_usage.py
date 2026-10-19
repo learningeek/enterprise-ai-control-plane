@@ -156,7 +156,10 @@ class OpenAIUsageConnector(Connector):
 
         prompt_tokens = row.get("input_tokens", 0)  # already includes input_cached_tokens; see docstring
         completion_tokens = row.get("output_tokens", 0)
-        vendor_model = row.get("model", "unknown")
+        # .get("model") or "unknown" — confirmed via OpenAI's own cookbook example: model is an explicit
+        # null, not absent, for any ungrouped dimension. This connector always includes "model" in
+        # group_by, so this is defensive, not expected to trigger — see anthropic_admin.py's identical fix.
+        vendor_model = row.get("model") or "unknown"
         model = self._model_resolver.resolve(vendor_model)
 
         return AIUsageEvent(
